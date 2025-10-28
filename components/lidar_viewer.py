@@ -1,5 +1,6 @@
 import json
 import time
+import rclpy
 import numpy as np
 import open3d as o3d
 import pages.home as home
@@ -29,18 +30,9 @@ class LivoxOpen3DViewer(Node):
         self.detected = o3d.geometry.PointCloud()
         self.plane_mesh = None
         self.show_ground_plane = True
-
-        while True:
-            if not self.vis.poll_events():
-                break
-            self.vis.update_renderer()
-            
-        self.vis.destroy_window()
-
-        # Remove Title Bar
-        # subprocess.run(["wmctrl", "-r", "Livox MID360 - Open3D Viewer", "-b", "add,fulllscreen"])
-
         self.roi_obb = None
+
+        self.vis.register_key_callback(256, lambda v: self.destroy_node())  # ESC key
 
         # ==== Keyboard control setup ====
         self.step_move = 0.01  # meter
@@ -360,6 +352,13 @@ class LivoxOpen3DViewer(Node):
         self.vis.poll_events()
         self.vis.update_renderer()
 
+        # if hasattr(self, "_should_close") and self._should_close:
+        #     self.get_logger().info("🔴 Closing Open3D Viewer...")
+        #     self.vis.destroy_window()
+        #     rclpy.shutdown()
+
     def destroy_node(self):
-        self.vis.destroy_window()
-        super().destroy_node()
+        # self.vis.destroy_window()
+        # super().destroy_node()
+        self._should_close = True
+        print(self._should_close)

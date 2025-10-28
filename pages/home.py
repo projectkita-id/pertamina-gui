@@ -19,7 +19,9 @@ def run_open3d_viewer():
             print(f"Error in run_open3d_viewer: {str(e)}")
         finally:
             print("Shutting down LivoxOpen3DViewer")
-            rclpy.shutdown()
+            if getattr(viewer, '_should_close', False):
+                print(viewer._should_close)
+                rclpy.shutdown()
 
 def open3d_thread():
     viewer_thread = threading.Thread(target=run_open3d_viewer, daemon=True)
@@ -48,7 +50,6 @@ class Home(ctk.CTkFrame) :
             command=open3d_thread
         )
         openWindow.pack()
-
 
         # Data
         valueFrame = ctk.CTkFrame(container, fg_color="white", height=100)
