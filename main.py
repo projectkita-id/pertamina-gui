@@ -1,7 +1,7 @@
 from PIL import ImageTk
 from components.db_config  import init
-import customtkinter as ctk
 
+import customtkinter as ctk
 import pages.home as home
 
 if __name__ == "__main__":

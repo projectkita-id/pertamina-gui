@@ -1,10 +1,35 @@
 from PIL import Image
-from sympy import content
+from multiprocessing import Process
+from components.lidar_viewer import LivoxCalib
+
+import os
+import rclpy
+import threading
 import pages.home as home
 import customtkinter as ctk
+import open3d.visualization.gui as gui
 import components.message_box as message
 import components.calibrate_tab_content as right
 from components.db_config import init, get_conf, save_conf
+
+def run_open3d_viewer():
+    rclpy.init()
+    app = gui.Application.instance
+    app.initialize()
+
+    node = LivoxCalib(app)
+    ros_thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
+    ros_thread.start()
+    
+    app.run()
+    node.save_roi_to_file()
+    node.destroy_node()
+    rclpy.shutdown()
+    ros_thread.join()
+
+def open3d_thread():
+    p = Process(target=run_open3d_viewer)
+    p.start()
 
 class Tabview(ctk.CTkFrame) :
     def __init__(self, parent, show_page) :
@@ -194,6 +219,14 @@ class Tabview(ctk.CTkFrame) :
         left_space = ctk.CTkFrame(self.calibrate_tab, fg_color="transparent")
         left_space.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
 
+        self.openWindow = ctk.CTkButton(
+            left_space,
+            text="Open 3D Lidar Viewer",
+            fg_color="#F01382",
+            command=open3d_thread
+        )
+        self.openWindow.pack()
+
         separator = ctk.CTkFrame(self.calibrate_tab, width=2, fg_color="darkgrey")
         separator.grid(row=0, column=1, sticky="ns")
 
@@ -241,3 +274,23 @@ class Tabview(ctk.CTkFrame) :
             message.MessageBox(self, "Success", "Database configuration saved successfully!", type="info")
         except Exception as e :
             message.MessageBox(self, "Error", f"Failed to save configuration: {str(e)}", type="error")
+
+    # def toggle_lidar(self):
+    #     import os
+    #     flag_window = "/tmp/lidar_calib_visible"
+
+    #     if os.path.exists(flag_window):
+    #         os.remove(flag_window)
+    #         self.openWindow.configure(text="Open 3D Lidar Viewer")
+    #     else:
+    #         open(flag_window, "a").close()
+    #         self.openWindow.configure(text="Close 3D Lidar Viewer")
+    
+    # def sync_button_text(self):
+    #     import os
+    #     flag_path = "/tmp/lidar_calib_visible"
+    #     if os.path.exists(flag_path):
+    #         self.openWindow.configure(text="Hide 3D Lidar Viewer")
+    #     else:
+    #         self.openWindow.configure(text="Open 3D Lidar Viewer")
+    #     self.after(300, self.sync_button_text)
