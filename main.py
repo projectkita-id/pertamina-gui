@@ -8,12 +8,14 @@ if __name__ == "__main__":
     # Style
     style = ctk.set_appearance_mode("light")
     ctk.set_default_color_theme("dark-blue")
+    ctk.set_widget_scaling(1.0)
 
     # Main Window
     root = ctk.CTk()
     root.title("Lidar Data Viewer")
-    root.geometry("1280x720")
-    root.minsize(800, 600)
+    # root.minsize(800, 600)
+    root.resizable(False, False)
+    root.geometry("500x900")   
 
     # App Icons
     appIcon = ImageTk.PhotoImage(file="assets/icon/logo.ico")

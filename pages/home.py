@@ -67,6 +67,7 @@ class Home(ctk.CTkFrame) :
         parent.protocol("WM_DELETE_WINDOW", on_close)
 
         # Font Template
+        fontSmall = ctk.CTkFont(family="Verdana", size=14, weight="bold")
         font = ctk.CTkFont(family="Verdana", size=24, weight="bold")
         fontBig = ctk.CTkFont(family="Verdana", size=48, weight="bold")
 
@@ -76,16 +77,17 @@ class Home(ctk.CTkFrame) :
         container = ctk.CTkFrame(self, fg_color="white", height=100)
         container.pack(fill="both", expand=True, padx=20, pady=20)
 
-        lidarFrame = ctk.CTkFrame(container, fg_color="white", border_width=2, border_color="darkgrey", corner_radius=20, height=300)
-        lidarFrame.pack(fill="both", expand=True)
-
         self.openWindow = ctk.CTkButton(
-            lidarFrame,
+            container,
             text="Open 3D Lidar Viewer",
+            font=fontSmall,
             fg_color="#F01382",
-            command=self.toggle_lidar
+            command=self.toggle_lidar,
+            height=40,
+            hover=False,
+            cursor="hand2"
         )
-        self.openWindow.pack()
+        self.openWindow.pack(fill="x")
 
         # Data
         valueFrame = ctk.CTkFrame(container, fg_color="white", height=100)
@@ -97,33 +99,36 @@ class Home(ctk.CTkFrame) :
 
         # Data Length
         self.lengthFrame = ctk.CTkFrame(valueFrame, fg_color="white", border_width=2, border_color="darkgrey", corner_radius=20)
-        self.lengthFrame.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        # self.lengthFrame.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        self.lengthFrame.pack(fill="x", pady=(0, 10))
 
         self.lengthLabel = ctk.CTkLabel(self.lengthFrame, text="Panjang", font=font, text_color="#F01382")
-        self.lengthLabel.pack(pady=(20, 0))
+        self.lengthLabel.pack(pady=(50, 0))
 
         self.lengthValue = ctk.CTkLabel(self.lengthFrame, text="12", font=fontBig, text_color="#F01382")
-        self.lengthValue.pack(pady=(35, 0))
+        self.lengthValue.pack(pady=50)
 
         # Data Width
         self.widthFrame = ctk.CTkFrame(valueFrame, fg_color="white", border_width=2, border_color="darkgrey", corner_radius=20)
-        self.widthFrame.grid(row=0, column=1, sticky="nsew", padx=10)
+        # self.widthFrame.grid(row=0, column=1, sticky="nsew", padx=10)
+        self.widthFrame.pack(fill="x", pady=10)
 
         self.widthLabel = ctk.CTkLabel(self.widthFrame, text="Lebar", font=font, text_color="#F01382")
-        self.widthLabel.pack(pady=(20, 0))
+        self.widthLabel.pack(pady=(50, 0))
 
         self.widthValue = ctk.CTkLabel(self.widthFrame, text="2.5", font=fontBig, text_color="#F01382")
-        self.widthValue.pack(pady=(35, 0))
+        self.widthValue.pack(pady=50)
 
         # Data Height
         self.heightFrame = ctk.CTkFrame(valueFrame, fg_color="white", border_width=2, border_color="darkgrey", corner_radius=20)
-        self.heightFrame.grid(row=0, column=2, sticky="nsew", padx=(10, 0))
+        # self.heightFrame.grid(row=0, column=2, sticky="nsew", padx=(10, 0))
+        self.heightFrame.pack(fill="x", pady=(10, 0))
 
         self.heightLabel = ctk.CTkLabel(self.heightFrame, text="Tinggi", font=font, text_color="#F01382")
-        self.heightLabel.pack(pady=(20, 0))
+        self.heightLabel.pack(pady=(50, 0))
 
         self.heightValue = ctk.CTkLabel(self.heightFrame, text="4", font=fontBig, text_color="#F01382")
-        self.heightValue.pack(pady=(35, 0))
+        self.heightValue.pack(pady=50)
 
         self.sync_button_text()
         self.update_dimension()

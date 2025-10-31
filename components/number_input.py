@@ -18,32 +18,11 @@ class NumberInput(ctk.CTkFrame):
         self.key_down = key_down
 
         self.entry = ctk.CTkEntry(
-            self, textvariable=self.value, width=80, height=45,
+            self, textvariable=self.value, height=45,
             justify="center", font=font, state="readonly", takefocus=0
         )
-        self.entry.pack(side="left", padx=(0, 10))
+        self.entry.pack(fill="x", padx=(0, 10))
         self.entry.bind("<KeyRelease>", self.validate_number)
-
-        self.button_frame = ctk.CTkFrame(self, fg_color="transparent")
-        self.button_frame.pack(side="left", fill="y")
-
-        up_icon = Image.open('assets/icon/arrow-up.png')
-        up_icon = ctk.CTkImage(light_image=up_icon, size=(12, 12))
-        self.plus_btn = ctk.CTkButton(
-            self.button_frame, text="", image=up_icon, width=25, height=18, cursor="hand2",
-            command=lambda: self._trigger_key(self.key_up, self.increment),
-            fg_color="#E0E0E0", hover_color="#CFCFCF", corner_radius=4
-        )
-        self.plus_btn.pack(pady=(0, 3))
-
-        down_icon = Image.open('assets/icon/arrow-down.png')
-        down_icon = ctk.CTkImage(light_image=down_icon, size=(12, 12))
-        self.minus_btn = ctk.CTkButton(
-            self.button_frame, text="", image=down_icon, width=25, height=18, cursor="hand2",
-            command=lambda: self._trigger_key(self.key_down, self.decrement),
-            fg_color="#E0E0E0", hover_color="#CFCFCF", corner_radius=4
-        )
-        self.minus_btn.pack(pady=(3, 0))
  
         if key_up:
             KEY_BIND_MAP[key_up.upper()] = (self, self.increment)

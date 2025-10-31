@@ -3,5 +3,5 @@ __pycache__/
 *.db
 *.sqlite3
 extra/
-*.json
-data/
+new3.py
+new4.py

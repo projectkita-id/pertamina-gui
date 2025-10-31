@@ -42,7 +42,7 @@ class Tabview(ctk.CTkFrame) :
 
         # Font Template
         font = ctk.CTkFont(family="Verdana", size=16, weight="bold")
-        fontBig = ctk.CTkFont(family="Verdana", size=24, weight="bold")
+        fontSmall = ctk.CTkFont(family="Verdana", size=14, weight="bold")
 
         # Tab Frame
         tabFrame = ctk.CTkFrame(self, fg_color="transparent")
@@ -102,7 +102,7 @@ class Tabview(ctk.CTkFrame) :
         # Database Tab Content
         self.db_tab = ctk.CTkFrame(self, fg_color="white", corner_radius=20, border_width=2, border_color="darkgrey")
         
-        ctk.CTkLabel(self.db_tab, text="Address", font=font, text_color="#F01382").pack(pady=(50, 5))
+        ctk.CTkLabel(self.db_tab, text="Address", font=font, text_color="#F01382").pack(pady=(80, 5))
         self.addr = ctk.CTkEntry(
             self.db_tab, 
             width=400, 
@@ -165,7 +165,7 @@ class Tabview(ctk.CTkFrame) :
             placeholder_text_color="darkgrey",
             justify="center"
         )
-        self.db_name.pack(pady=5)
+        self.db_name.pack(pady=(5, 0))
 
         entries = [
             (self.addr, address_val),
@@ -178,36 +178,36 @@ class Tabview(ctk.CTkFrame) :
         for entry, value in entries:
             if value:
                 entry.insert(0, value)
-            entry.pack(pady=5)
+            entry.pack()
 
         btn_area = ctk.CTkFrame(self.db_tab, height=40, width=350, fg_color="white")
-        btn_area.pack(pady=(0, 20), anchor="center", expand=True)
+        btn_area.pack(padx=20, expand=True)
 
         cancel_btn = ctk.CTkButton(
             btn_area,
             text="Cancel",
             font=font,
-            width=150,
-            height=40,
+            width=200,
+            height=50,
             corner_radius=20,
             fg_color="red",
             hover_color="#ff4d4d",
             cursor="hand2",
             command=lambda : show_page(home.Home)
-        ).pack(side="left", padx=(0, 10))
+        ).pack(fill="x", pady=10)
 
         save_btn = ctk.CTkButton(
             btn_area,
             text="Save",
             font=font,
-            width=150,
-            height=40,
+            width=200,
+            height=50,
             corner_radius=20,
             fg_color="#4CAF50",
             hover_color="#45a049",
             cursor="hand2",
             command=self.save_data
-        ).pack(side="right", padx=(10, 0))
+        ).pack(fill="x", pady=10)
 
         # Lidar Tab Content
         self.calibrate_tab = ctk.CTkFrame(self, fg_color="white", corner_radius=20, border_width=2, border_color="darkgrey")
@@ -216,24 +216,22 @@ class Tabview(ctk.CTkFrame) :
         self.calibrate_tab.grid_columnconfigure(2, weight=1)
         self.calibrate_tab.grid_rowconfigure(0, weight=1)
 
-        left_space = ctk.CTkFrame(self.calibrate_tab, fg_color="transparent")
-        left_space.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        space = ctk.CTkFrame(self.calibrate_tab, fg_color="transparent", corner_radius=20)
+        # space.grid(row=0, column=2, sticky="nsew", padx=10, pady=10)
+        space.pack(fill="x", expand=True, padx=10, pady=10)
 
         self.openWindow = ctk.CTkButton(
-            left_space,
+            space,
             text="Open 3D Lidar Viewer",
             fg_color="#F01382",
+            font=fontSmall,
+            hover=False,
+            cursor="hand2",
             command=open3d_thread
         )
         self.openWindow.pack()
 
-        separator = ctk.CTkFrame(self.calibrate_tab, width=2, fg_color="darkgrey")
-        separator.grid(row=0, column=1, sticky="ns")
-
-        right_space = ctk.CTkFrame(self.calibrate_tab, fg_color="transparent", corner_radius=20)
-        right_space.grid(row=0, column=2, sticky="nsew", padx=10, pady=10)
-
-        right.CalibrateTabContent(right_space, show_page=show_page).pack(fill="both", expand=True)
+        right.CalibrateTabContent(space, show_page=show_page).pack(fill="both", expand=True)
 
         self.show_tab("db")
 
