@@ -1019,7 +1019,7 @@ class LivoxCalib(Node):
             return None
 
         # 3) Cluster & kumpulkan semua label valid (eps lebih ketat)
-        labels = np.array(work.cluster_dbscan(eps=0.1, min_points=6, print_progress=False))
+        labels = np.array(work.cluster_dbscan(eps=2.0, min_points=4, print_progress=False))
         if (labels >= 0).any():
             obj_points = np.asarray(work.points)[labels >= 0]
         else:
@@ -1073,8 +1073,8 @@ class LivoxCalib(Node):
         # Proyeksikan ke sumbu PCA yang sudah stabil
         proj = Xc @ V
         # Persentil lebih ketat untuk tahan outlier
-        p_low, p_high = np.percentile(proj[:, 0], [3.0, 97.0])
-        q_low, q_high = np.percentile(proj[:, 1], [3.0, 97.0])
+        p_low, p_high = np.percentile(proj[:, 0], [0.1, 99.0])
+        q_low, q_high = np.percentile(proj[:, 1], [0.1, 99.0])
         true_length = float(p_high - p_low)
         true_width  = float(q_high - q_low)
 
@@ -1096,7 +1096,7 @@ class LivoxCalib(Node):
         if true_height > 1.25 * median_h:   # guard outlier ke atas
             true_height = median_h
         if self._last_height is not None:
-            true_height = 0.28 * true_height + 0.75 * self._last_height
+            true_height = 0.33 * true_height + 0.75 * self._last_height
         self._last_height = true_height
 
         # P & L
@@ -1112,7 +1112,7 @@ class LivoxCalib(Node):
             l_corr = float(xy_med[1])
         if self._last_xy is not None:
             p_corr = 0.25 * p_corr + 0.75 * float(self._last_xy[0])
-            l_corr = 0.20 * l_corr + 0.75 * float(self._last_xy[1])
+            l_corr = 0.27 * l_corr + 0.75 * float(self._last_xy[1])
         self._last_xy = np.array([p_corr, l_corr], dtype=np.float32)
 
         # --- OBB hanya visual (tak dipakai ukur) ---
