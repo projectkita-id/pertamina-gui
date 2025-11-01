@@ -33,8 +33,6 @@ class CalibrateTabContent(ctk.CTkFrame):
         self.moveZ = input.NumberInput(self.move_tab, key_up="W", key_down="S")
         self.moveZ.pack(pady=(0, 20))
 
-        
-
         ctk.CTkLabel(self.move_tab, text="Pitch", font=fontNormal, text_color="#F01382").pack(pady=(20, 10))
         self.pitch = input.NumberInput(self.move_tab, key_up="U", key_down="Y")
         self.pitch.pack(pady=(0, 20))

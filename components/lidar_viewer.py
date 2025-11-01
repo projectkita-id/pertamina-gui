@@ -4,6 +4,7 @@ from datetime import datetime
 from multiprocessing import Queue
 from sensor_msgs.msg import PointCloud2
 from components.db_config import get_conf
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 import time
 import queue
@@ -36,50 +37,127 @@ def upload(p, l, t):
     port = int(port) if port else 3306
 
     conn = None
-    try:
-        conn = pymysql.connect(
-            host=address,
-            user=username,
-            password=password,
-            port=port,
-            database=db_name,
-            charset='utf8mb4',
-            cursorclass=pymysql.cursors.DictCursor
-        )
-        cursor = conn.cursor()
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS data (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                panjang FLOAT NOT NULL,
-                lebar FLOAT NOT NULL,
-                tinggi FLOAT NOT NULL,
-                timestamp DATETIME NOT NULL
+    retries = 3  # Max retry kalau timeout
+    while retries > 0:
+        try:
+            conn = pymysql.connect(
+                host=address,
+                user=username,
+                password=password,
+                port=port,
+                database=db_name,
+                charset='utf8mb4',
+                cursorclass=pymysql.cursors.DictCursor,
+                connect_timeout=10  # Timeout connect 10 detik (default infinite, bikin lelet)
             )
-        """)
-        conn.commit()
+            cursor = conn.cursor()
 
-        timestamp = datetime.now()
-        cursor.execute("""
-            INSERT INTO data (panjang, lebar, tinggi, timestamp)
-            VALUES (%s, %s, %s, %s)
-        """, (round(p, 2), round(l, 2), round(t, 2), timestamp))
-        conn.commit()
-        print(f"[INFO] Data dikirim ke DB: P={round(p, 2)}, L={round(l, 2)}, T={round(t, 2)}, Timestamp={timestamp}")
-        LAST_SEND = current_time
-    except pymysql.MySQLError as e:
-        print(f"[ERROR] Gagal mengirim data ke database: {str(e)}")
-    finally:
-        if conn:
-            conn.close()
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS data (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    panjang FLOAT NOT NULL,
+                    lebar FLOAT NOT NULL,
+                    tinggi FLOAT NOT NULL,
+                    timestamp DATETIME NOT NULL
+                )
+            """)
+            conn.commit()
+
+            timestamp = datetime.now()
+            cursor.execute("""
+                INSERT INTO data (panjang, lebar, tinggi, timestamp)
+                VALUES (%s, %s, %s, %s)
+            """, (round(p, 2), round(l, 2), round(t, 2), timestamp))
+            conn.commit()
+            print(f"[INFO] Data dikirim ke DB: P={round(p, 2)}, L={round(l, 2)}, T={round(t, 2)}, Timestamp={timestamp}")
+            LAST_SEND = current_time
+            break  # Sukses, keluar loop
+        except pymysql.MySQLError as e:
+            retries -= 1
+            print(f"[ERROR] Gagal mengirim data ke database (retry {3-retries}): {str(e)}")
+            if retries == 0:
+                print("[ERROR] Max retry reached, skipping upload")
+            time.sleep(1)  # Delay sedikit sebelum retry
+        finally:
+            if conn:
+                conn.close()
+
+def upload(p, l, t):
+    global LAST_SEND
+    current_time = time.time()
+    if current_time - LAST_SEND < 5:
+        print("[INFO] Melewati upload data untuk menghindari pengiriman berlebih.")
+        return
+
+    config = get_conf(["address", "username", "password", "port", "db_name"])
+    if not all(config):
+        print("[ERROR] Database configuration is incomplete.")
+        return
+    
+    address, username, password, port, db_name = config
+    port = int(port) if port else 3306
+
+    conn = None
+    retries = 3  # Max retry kalau timeout
+    while retries > 0:
+        try:
+            conn = pymysql.connect(
+                host=address,
+                user=username,
+                password=password,
+                port=port,
+                database=db_name,
+                charset='utf8mb4',
+                cursorclass=pymysql.cursors.DictCursor,
+                connect_timeout=10  # Timeout connect 10 detik (default infinite, bikin lelet)
+            )
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS data (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    panjang FLOAT NOT NULL,
+                    lebar FLOAT NOT NULL,
+                    tinggi FLOAT NOT NULL,
+                    timestamp DATETIME NOT NULL
+                )
+            """)
+            conn.commit()
+
+            timestamp = datetime.now()
+            cursor.execute("""
+                INSERT INTO data (panjang, lebar, tinggi, timestamp)
+                VALUES (%s, %s, %s, %s)
+            """, (round(p, 2), round(l, 2), round(t, 2), timestamp))
+            conn.commit()
+            print(f"[INFO] Data dikirim ke DB: P={round(p, 2)}, L={round(l, 2)}, T={round(t, 2)}, Timestamp={timestamp}")
+            LAST_SEND = current_time
+            break  # Sukses, keluar loop
+        except pymysql.MySQLError as e:
+            retries -= 1
+            print(f"[ERROR] Gagal mengirim data ke database (retry {3-retries}): {str(e)}")
+            if retries == 0:
+                print("[ERROR] Max retry reached, skipping upload")
+            time.sleep(1)  # Delay sedikit sebelum retry
+        finally:
+            if conn:
+                conn.close()
 
 class LivoxGUI(Node):
-    def __init__(self, app, dim_queue=None):
+    def __init__(self, app, p_val=None, l_val=None, t_val=None, data_event=None):
         global GUI_INSTANCE
         super().__init__("livox_open3d_gui")
-        self.sub = self.create_subscription(PointCloud2, "/livox/lidar", self.cb, 10)
+        qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1
+        )
+        self.sub = self.create_subscription(PointCloud2, "/livox/lidar", self.cb, qos)
 
-        self.dim_queue = dim_queue if dim_queue is not None else Queue
+        self.p_val = p_val
+        self.l_val = l_val
+        self.t_val = t_val
+        self.data_event = data_event
 
         self.app = app
         self.window = app.create_window("Livox MID360 - Open3D GUI", 1280, 600)
@@ -556,13 +634,15 @@ class LivoxGUI(Node):
                 print(dim_text)
 
                 try:
-                    print("sending to gui")
-                    self.dim_queue.put_nowait((P, L, T))
-                    upload(P, L, T)
-                except queue.Full:
-                    print("nope, queue full - skip data")  # Kalau full
+                    print("sending to gui directly via shared mem")
+                    if self.p_val is not None and self.data_event is not None:
+                        self.p_val.value = P
+                        self.l_val.value = L
+                        self.t_val.value = T
+                        self.data_event.set()  # Signal ke GUI bahwa data ready
+                    threading.Thread(target=upload, args=(P, L, T), daemon=True).start()
                 except Exception as e:
-                    print(f"nope, sending error: {type(e).__name__} - {str(e)}")  # Detail error
+                    print(f"nope, sending error: {type(e).__name__} - {str(e)}")
                     pass
 
                 if obb is not None:
@@ -622,10 +702,20 @@ class LivoxGUI(Node):
             self.show_window()
 
 class LivoxCalib(Node):
-    def __init__(self, app):
+    def __init__(self, app, p_val=None, l_val=None, t_val=None, data_event=None):
         global GUI_INSTANCE
         super().__init__("livox_open3d_gui")
-        self.sub = self.create_subscription(PointCloud2, "/livox/lidar", self.cb, 10)
+        qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1
+        )
+        self.sub = self.create_subscription(PointCloud2, "/livox/lidar", self.cb, qos)
+
+        self.p_val = p_val
+        self.l_val = l_val
+        self.t_val = t_val
+        self.data_event = data_event
 
         self.app = app
         self.window = app.create_window("Livox MID360 - Open3D GUI", 1600, 900)
@@ -1117,6 +1207,18 @@ class LivoxCalib(Node):
                 P, L, T, obb = result
                 dim_text = f"Objek: P={P:.3f} m, L={L:.3f} m, T={T:.3f} m"
                 print(dim_text)
+
+                try:
+                    print("sending to gui directly via shared mem")
+                    if self.p_val is not None and self.data_event is not None:
+                        self.p_val.value = P
+                        self.l_val.value = L
+                        self.t_val.value = T
+                        self.data_event.set()  # Signal ke GUI bahwa data ready
+                    threading.Thread(target=upload, args=(P, L, T), daemon=True).start()
+                except Exception as e:
+                    print(f"nope, sending error: {type(e).__name__} - {str(e)}")
+                    pass
 
                 if obb is not None:
                     mat_box = rendering.MaterialRecord()

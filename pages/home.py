@@ -10,11 +10,16 @@ import components.header as header
 import open3d.visualization.gui as gui
 import components.connection_check as connection_check
 
-from multiprocessing import Process, Queue
+from multiprocessing import Process, Value, Event
 from components.lidar_viewer import LivoxGUI
 
-DIMENSION_QUEUE = Queue(maxsize=1000)
+# DIMENSION_QUEUE = Queue(maxsize=1000)
 PROCESS = []
+
+P_VAL = Value('d', 0.0)
+L_VAL = Value('d', 0.0)
+T_VAL = Value('d', 0.0)
+DATA_EVENT = Event()
 
 def kill():
     print("Killing processes...")
@@ -29,12 +34,12 @@ def kill():
                 p.join()
     PROCESS.clear()
 
-def run_open3d_viewer(dim_queue):
+def run_open3d_viewer(p_val, l_val, t_val, data_event):
     rclpy.init()
     app = gui.Application.instance
     app.initialize()
 
-    node = LivoxGUI(app, dim_queue=dim_queue)
+    node = LivoxGUI(app, p_val=p_val, l_val=l_val, t_val=t_val, data_event=data_event)
     ros_thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
     ros_thread.start()
     
@@ -45,7 +50,7 @@ def run_open3d_viewer(dim_queue):
     ros_thread.join()
 
 def open3d_thread():
-    p = Process(target=run_open3d_viewer, args=(DIMENSION_QUEUE,))
+    p = Process(target=run_open3d_viewer, args=(P_VAL, L_VAL, T_VAL, DATA_EVENT))
     PROCESS.append(p)
     p.start()
     return p
@@ -64,7 +69,14 @@ class Home(ctk.CTkFrame) :
                 os.remove("/tmp/lidar_visible")
             parent.destroy()
 
+        self.stop_consumer = threading.Event()
+        self.dimension_consumer_thread = threading.Thread(target=self.dimension_consumer, daemon=True)
+        self.dimension_consumer_thread.start()
+
+        self.bind("<Destroy>", self.on_destroy)
+
         parent.protocol("WM_DELETE_WINDOW", on_close)
+        self.last_update = 0
 
         # Font Template
         fontSmall = ctk.CTkFont(family="Verdana", size=14, weight="bold")
@@ -131,7 +143,8 @@ class Home(ctk.CTkFrame) :
         self.heightValue.pack(pady=50)
 
         self.sync_button_text()
-        self.update_dimension()
+        self.dimension_consumer_thread = threading.Thread(target=self.dimension_consumer, daemon=True)
+        self.dimension_consumer_thread.start()
     
     def toggle_lidar(self):
         flag_window = "/tmp/lidar_visible"
@@ -150,15 +163,29 @@ class Home(ctk.CTkFrame) :
             self.openWindow.configure(text="Open 3D Lidar Viewer")
         self.after(300, self.sync_button_text)
 
-    def update_dimension(self) :
-        try :
-            while True :
-                p, l ,t = DIMENSION_QUEUE.get_nowait()
-                print(f"[DEBUG] Dapat data: P={p:.2f}, L={l:.2f}, T={t:.2f}")
-                self.lengthValue.configure(text=f"{p:.2f}")
-                self.widthValue.configure(text=f"{l:.2f}")
-                self.heightValue.configure(text=f"{t:.2f}")
-        except queue.Empty :
-            print("[DEBUG] Queue kosong")
-            pass
-        self.after(100, self.update_dimension)
+    def on_destroy(self, event=None):
+        print("[DEBUG] Home frame destroyed (page switched)")
+        self.stop_consumer.set()
+
+    def dimension_consumer(self):
+        """Thread ini tunggu event (blocking), ambil latest shared value, lalu schedule update UI."""
+        while True:
+            DATA_EVENT.wait()  # Blocking wait sampai data ready (dari LIDAR cb)
+            p = P_VAL.value
+            l = L_VAL.value
+            t = T_VAL.value
+            print(f"[DEBUG] Dapat data langsung via shared mem: P={p:.2f}, L={l:.2f}, T={t:.2f}")
+            DATA_EVENT.clear()  # Reset event untuk next data
+            # Schedule update di main thread CTk
+            self.after(0, self.update_dimension, p, l, t)
+
+    def update_dimension(self, p, l, t) :
+        current_time = time.time()
+        if current_time - self.last_update < 0.1:  # Debounce: Update hanya tiap 0.2 detik min
+            print("[DEBUG] Skipping UI update (debounce)")
+            return
+        self.lengthValue.configure(text=f"{p:.2f}")
+        self.widthValue.configure(text=f"{l:.2f}")
+        self.heightValue.configure(text=f"{t:.2f}")
+        self.last_update = current_time
+        print("[DEBUG] UI updated")
