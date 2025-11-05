@@ -5,3 +5,5 @@ __pycache__/
 extra/
 new3.py
 new4.py
+data/
+*.json

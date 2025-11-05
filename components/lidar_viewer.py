@@ -187,6 +187,10 @@ class LivoxGUI(Node):
 
         self.pcd = o3d.geometry.PointCloud()
         self._camera_set = False
+         # ==== Frame & point size control ====
+        self.last_update_time = self.get_clock().now()
+        self.frame_interval = 0.1   # detik per frame (0.1 = 10 Hz)
+        self.point_size = 5.0       # ukuran titik point cloud
 
         # === Geometry names to manage on scene ===
         self._name_cloud = "PointCloud"
@@ -197,7 +201,7 @@ class LivoxGUI(Node):
         self.show_ground_color = True         # hanya mematikan warna, bukan deteksi
         self.ground_model = None
         self.is_calibrating = False
-        self.ground_thresh = 0.03             # <— lebih ketat dari 0.08, bisa disesuaikan
+        self.ground_thresh = 0.8             # <— lebih ketat dari 0.08, bisa disesuaikan
         self.calib_thresh = 0.02              # RANSAC distance saat kalibrasi
 
         # Smoothing state
@@ -498,8 +502,8 @@ class LivoxGUI(Node):
         # Proyeksikan ke sumbu PCA yang sudah stabil
         proj = Xc @ V
         # Persentil lebih ketat untuk tahan outlier
-        p_low, p_high = np.percentile(proj[:, 0], [3.0, 97.0])
-        q_low, q_high = np.percentile(proj[:, 1], [3.0, 97.0])
+        p_low, p_high = np.percentile(proj[:, 0], [1.0, 99.0])
+        q_low, q_high = np.percentile(proj[:, 1], [1.0, 99.0])
         true_length = float(p_high - p_low)
         true_width  = float(q_high - q_low)
 
@@ -518,15 +522,18 @@ class LivoxGUI(Node):
         if len(self._dim_hist_height) > 12:
             self._dim_hist_height.pop(0)
         median_h = float(np.median(self._dim_hist_height))
-        if true_height > 1.25 * median_h:   # guard outlier ke atas
+
+        # Height guard ± (dua arah)
+        if true_height > 1.25 * median_h or true_height < 0.7 * median_h:
             true_height = median_h
+
         if self._last_height is not None:
-            true_height = 0.28 * true_height + 0.75 * self._last_height
+            true_height = 0.2 * true_height + 0.8 * self._last_height
         self._last_height = true_height
 
         # P & L
         self._dim_hist_xy.append([true_length, true_width])
-        if len(self._dim_hist_xy) > 12:
+        if len(self._dim_hist_xy) > 50:
             self._dim_hist_xy.pop(0)
         xy_med = np.median(self._dim_hist_xy, axis=0)
         p_corr, l_corr = true_length, true_width
@@ -536,8 +543,8 @@ class LivoxGUI(Node):
         if abs(l_corr - xy_med[1]) > 0.15 * max(1e-6, xy_med[1]):
             l_corr = float(xy_med[1])
         if self._last_xy is not None:
-            p_corr = 0.25 * p_corr + 0.75 * float(self._last_xy[0])
-            l_corr = 0.20 * l_corr + 0.75 * float(self._last_xy[1])
+            p_corr = 0.2 * p_corr + 0.8 * float(self._last_xy[0])
+            l_corr = 0.2 * l_corr + 0.8 * float(self._last_xy[1])
         self._last_xy = np.array([p_corr, l_corr], dtype=np.float32)
 
         # --- OBB hanya visual (tak dipakai ukur) ---
@@ -554,6 +561,13 @@ class LivoxGUI(Node):
 
     # ----------------- Callback ROS -----------------
     def cb(self, msg):
+        # --- Batasi update rate sesuai frame_interval ---
+        now = self.get_clock().now()
+        dt = (now - self.last_update_time).nanoseconds * 1e-9
+        if dt < self.frame_interval:
+            return  # skip frame, terlalu cepat
+        self.last_update_time = now
+
         cloud = list(pc2.read_points(msg, field_names=("x", "y", "z", "intensity"), skip_nans=True))
         if not cloud:
             return
@@ -745,6 +759,10 @@ class LivoxCalib(Node):
 
         self.pcd = o3d.geometry.PointCloud()
         self._camera_set = False
+        # ==== Frame & point size control ====
+        self.last_update_time = self.get_clock().now()
+        self.frame_interval = 0.1   # detik per frame (0.1 = 10 Hz)
+        self.point_size = 5.0       # ukuran titik point cloud
 
         # === Geometry names to manage on scene ===
         self._name_cloud = "PointCloud"
@@ -755,7 +773,7 @@ class LivoxCalib(Node):
         self.show_ground_color = True         # hanya mematikan warna, bukan deteksi
         self.ground_model = None
         self.is_calibrating = False
-        self.ground_thresh = 0.03             # <— lebih ketat dari 0.08, bisa disesuaikan
+        self.ground_thresh = 0.1             # <— lebih ketat dari 0.08, bisa disesuaikan
         self.calib_thresh = 0.02              # RANSAC distance saat kalibrasi
 
         # Smoothing state
@@ -1129,6 +1147,13 @@ class LivoxCalib(Node):
 
     # ----------------- Callback ROS -----------------
     def cb(self, msg):
+        # --- Batasi update rate sesuai frame_interval ---
+        now = self.get_clock().now()
+        dt = (now - self.last_update_time).nanoseconds * 1e-9
+        if dt < self.frame_interval:
+            return  # skip frame, terlalu cepat
+        self.last_update_time = now
+        
         cloud = list(pc2.read_points(msg, field_names=("x", "y", "z", "intensity"), skip_nans=True))
         if not cloud:
             return
