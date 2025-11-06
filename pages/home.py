@@ -60,7 +60,11 @@ class Home(ctk.CTkFrame) :
         super().__init__(parent, fg_color="white")
         header.Header(self, show_page).pack(fill="x")
 
-        open3d_thread()
+        if not PROCESS:  # hanya buat viewer pertama kali
+            open3d_thread()
+        else:
+            print("[INFO] Open3D viewer sudah berjalan, tidak membuat ulang.")
+
 
         def on_close():
             print("Closing application...")

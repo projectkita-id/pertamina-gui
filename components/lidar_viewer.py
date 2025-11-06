@@ -18,8 +18,11 @@ import rclpy, threading, numpy as np, json, os, matplotlib.pyplot as plt
 GUI_INSTANCE = None
 LAST_SEND = 0
 
-CONFIG_PATH = os.path.join(os.path.dirname(__file__), "roi_config.json")
-GROUND_MODEL_PATH = os.path.join(os.path.dirname(__file__), "ground_plane.npy")
+# ==== Global config paths (agar sinkron antar proses) ====
+BASE_DIR = os.path.abspath(os.getcwd())  # Folder tempat main.py dijalankan
+CONFIG_PATH = os.path.join(BASE_DIR, "roi_config.json")
+GROUND_MODEL_PATH = os.path.join(BASE_DIR, "ground_plane.npy")
+
 
 def upload(p, l, t):
     global LAST_SEND
@@ -201,7 +204,7 @@ class LivoxGUI(Node):
         self.show_ground_color = True         # hanya mematikan warna, bukan deteksi
         self.ground_model = None
         self.is_calibrating = False
-        self.ground_thresh = 0.8             # <— lebih ketat dari 0.08, bisa disesuaikan
+        self.ground_thresh = 0.1             # <— lebih ketat dari 0.08, bisa disesuaikan
         self.calib_thresh = 0.02              # RANSAC distance saat kalibrasi
 
         # Smoothing state
@@ -224,6 +227,10 @@ class LivoxGUI(Node):
 
         # ==== Load ROI config ====
         self.load_roi_from_file()
+
+         # ==== ROI & Ground auto-reload watcher ====
+        self._config_watch_thread = threading.Thread(target=self._watch_config_files, daemon=True)
+        self._config_watch_thread.start()
 
         # ==== ROI geometry ====
         self.roi_box = self.create_roi_box()
@@ -385,6 +392,41 @@ class LivoxGUI(Node):
         else:
             self.get_logger().warn("❌ Belum ada model ground, lakukan kalibrasi dahulu!")
             self.show_toast("Belum ada ground model")
+
+    def _watch_config_files(self):
+        """Pantau perubahan file ROI & ground plane, reload otomatis jika berubah"""
+        def safe_mtime(path):
+            try:
+                return os.path.getmtime(path) if os.path.exists(path) else 0
+            except Exception:
+                return 0
+
+        roi_mtime = safe_mtime(CONFIG_PATH)
+        ground_mtime = safe_mtime(GROUND_MODEL_PATH)
+
+        while True:
+            time.sleep(2)
+            new_roi_mtime = safe_mtime(CONFIG_PATH)
+            new_ground_mtime = safe_mtime(GROUND_MODEL_PATH)
+
+            # Jika ROI berubah
+            if new_roi_mtime != roi_mtime:
+                roi_mtime = new_roi_mtime
+                print("[INFO] ROI config file changed, reloading in Home viewer...")
+                gui.Application.instance.post_to_main_thread(
+                    self.window,
+                    lambda: (self.load_roi_from_file(), self.update_roi_box())
+                )
+
+            # Jika ground model berubah
+            if new_ground_mtime != ground_mtime:
+                ground_mtime = new_ground_mtime
+                print("[INFO] Ground model file changed, reloading in Home viewer...")
+                gui.Application.instance.post_to_main_thread(
+                    self.window,
+                    lambda: self.load_ground_model()
+                )
+
 
     # ----------------- ROI persistence -----------------
     def save_roi_to_file(self):
@@ -718,7 +760,7 @@ class LivoxGUI(Node):
 class LivoxCalib(Node):
     def __init__(self, app, p_val=None, l_val=None, t_val=None, data_event=None):
         global GUI_INSTANCE
-        super().__init__("livox_open3d_gui")
+        super().__init__("livox_open3d_calib")
         qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             history=HistoryPolicy.KEEP_LAST,
@@ -808,17 +850,17 @@ class LivoxCalib(Node):
 
         self.panel.add_child(gui.Label("ROI Box Controls"))
         self.panel.add_child(gui.Label("Position (m)"))
-        self.panel.add_child(self.make_plus_minus_row("X", "roi_center", 0, 0.01))
-        self.panel.add_child(self.make_plus_minus_row("Y", "roi_center", 1, 0.01))
-        self.panel.add_child(self.make_plus_minus_row("Z", "roi_center", 2, 0.01))
+        self.panel.add_child(self.make_plus_minus_row("X", "roi_center", 0, 0.1))
+        self.panel.add_child(self.make_plus_minus_row("Y", "roi_center", 1, 0.1))
+        self.panel.add_child(self.make_plus_minus_row("Z", "roi_center", 2, 0.1))
         self.panel.add_child(gui.Label("Size (m)"))
-        self.panel.add_child(self.make_plus_minus_row("Size X", "roi_size", 0, 0.01))
-        self.panel.add_child(self.make_plus_minus_row("Size Y", "roi_size", 1, 0.01))
-        self.panel.add_child(self.make_plus_minus_row("Size Z", "roi_size", 2, 0.01))
+        self.panel.add_child(self.make_plus_minus_row("Size X", "roi_size", 0, 0.1))
+        self.panel.add_child(self.make_plus_minus_row("Size Y", "roi_size", 1, 0.1))
+        self.panel.add_child(self.make_plus_minus_row("Size Z", "roi_size", 2, 0.1))
         self.panel.add_child(gui.Label("Rotation (deg)"))
-        self.panel.add_child(self.make_plus_minus_row("Roll",  "roi_rpy", 0, 0.01))
-        self.panel.add_child(self.make_plus_minus_row("Pitch", "roi_rpy", 1, 0.01))
-        self.panel.add_child(self.make_plus_minus_row("Yaw",   "roi_rpy", 2, 0.01))
+        self.panel.add_child(self.make_plus_minus_row("Roll",  "roi_rpy", 0, 0.1))
+        self.panel.add_child(self.make_plus_minus_row("Pitch", "roi_rpy", 1, 0.1))
+        self.panel.add_child(self.make_plus_minus_row("Yaw",   "roi_rpy", 2, 0.1))
 
         # Buttons utama
         save_btn = gui.Button("Save ROI")
