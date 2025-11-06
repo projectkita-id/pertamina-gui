@@ -3,6 +3,19 @@ from components.db_config  import init
 
 import customtkinter as ctk
 import pages.home as home
+import subprocess
+import time
+
+# Jalankan ROS2 driver
+subprocess.Popen([
+    "bash", "-c",
+    "source /opt/ros/humble/setup.bash && \
+     source ~/livox_ws/install/setup.bash && \
+     ros2 launch livox_ros_driver2 rviz_MID360_launch.py"
+])
+
+time.sleep(3)
+# lalu lanjut ke GUI utama
 
 if __name__ == "__main__":
     # Style

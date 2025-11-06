@@ -23,6 +23,7 @@ DATA_EVENT = Event()
 
 def kill():
     print("Killing processes...")
+    os.system("pkill -f 'livox_ros_driver2'")
     for p in PROCESS:
         if p.is_alive():
             print(f"Terminating process {p.pid}...")
@@ -68,6 +69,8 @@ class Home(ctk.CTkFrame) :
 
         def on_close():
             print("Closing application...")
+            # Setelah GUI ditutup, hentikan semua proses ros2 launch
+            os.system("pkill -f 'livox_ros_driver2'")
             kill()
             if os.path.exists("/tmp/lidar_visible"):
                 os.remove("/tmp/lidar_visible")
