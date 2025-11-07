@@ -1,0 +1,49 @@
+{
+  "general": {
+    "frame_interval": 0.1,
+    "point_size": 10.0,
+    "lidar_tilt_deg": 30.0,
+    "lidar_invert_z": true
+  },
+
+  "ground": {
+    "ground_thresh": 0.03,
+    "calib_thresh": 0.02,
+    "distance_threshold": 0.015,
+    "ransac_n": 3,
+    "num_iterations": 300
+  },
+
+  "noise_filter": {
+    "nb_neighbors": 20,
+    "std_ratio": 2.0
+  },
+
+  "cluster": {
+    "eps": 0.1,
+    "min_points": 6
+  },
+
+  "adaptive_filter": {
+    "min_thresh": 0.02,
+    "max_thresh": 0.06,
+    "scale_factor": 3.0
+  },
+
+  "height_smoothing": {
+    "max_history": 20,
+    "guard_high": 1.3,
+    "guard_low": 0.7,
+    "ema_factor_new": 0.3,
+    "ema_factor_old": 0.7
+  },
+
+  "dimension_smoothing": {
+    "max_history": 20,
+    "deviation_guard": 0.15,
+    "ema_factor_length_new": 0.25,
+    "ema_factor_length_old": 0.75,
+    "ema_factor_width_new": 0.25,
+    "ema_factor_width_old": 0.75
+  }
+}

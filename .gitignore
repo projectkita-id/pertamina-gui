@@ -7,3 +7,4 @@ new3.py
 new4.py
 data/
 *.json
+!measure_config.json

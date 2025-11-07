@@ -175,24 +175,35 @@ class Home(ctk.CTkFrame) :
         self.stop_consumer.set()
 
     def dimension_consumer(self):
-        """Thread ini tunggu event (blocking), ambil latest shared value, lalu schedule update UI."""
-        while True:
-            DATA_EVENT.wait()  # Blocking wait sampai data ready (dari LIDAR cb)
+        """Thread ini tunggu event, ambil latest shared value, lalu schedule update UI."""
+        while not self.stop_consumer.is_set():
+            DATA_EVENT.wait()
+            if self.stop_consumer.is_set():
+                break
             p = P_VAL.value
             l = L_VAL.value
             t = T_VAL.value
             print(f"[DEBUG] Dapat data langsung via shared mem: P={p:.2f}, L={l:.2f}, T={t:.2f}")
-            DATA_EVENT.clear()  # Reset event untuk next data
-            # Schedule update di main thread CTk
+            DATA_EVENT.clear()
+            if not self.winfo_exists():
+                break
             self.after(0, self.update_dimension, p, l, t)
 
-    def update_dimension(self, p, l, t) :
+    def update_dimension(self, p, l, t):
+        if not self.winfo_exists():
+            print("[DEBUG] Frame sudah dihancurkan, abaikan update_dimension")
+            return
+
         current_time = time.time()
-        if current_time - self.last_update < 0.1:  # Debounce: Update hanya tiap 0.2 detik min
+        if current_time - self.last_update < 0.1:
             print("[DEBUG] Skipping UI update (debounce)")
             return
-        self.lengthValue.configure(text=f"{p:.2f}")
-        self.widthValue.configure(text=f"{l:.2f}")
-        self.heightValue.configure(text=f"{t:.2f}")
-        self.last_update = current_time
-        print("[DEBUG] UI updated")
+
+        try:
+            self.lengthValue.configure(text=f"{p:.2f}")
+            self.widthValue.configure(text=f"{l:.2f}")
+            self.heightValue.configure(text=f"{t:.2f}")
+            self.last_update = current_time
+            print("[DEBUG] UI updated")
+        except Exception as e:
+            print(f"[DEBUG] Gagal update UI: {type(e).__name__} - {e}")

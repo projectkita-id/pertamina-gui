@@ -22,6 +22,76 @@ LAST_SEND = 0
 BASE_DIR = os.path.abspath(os.getcwd())  # Folder tempat main.py dijalankan
 CONFIG_PATH = os.path.join(BASE_DIR, "roi_config.json")
 GROUND_MODEL_PATH = os.path.join(BASE_DIR, "ground_plane.npy")
+MEASURE_CONFIG_PATH = os.path.join(BASE_DIR, "measure_config.json")
+
+def load_measure_config():
+    """Muat konfigurasi dari measure_config.json dengan fallback default."""
+    default = {
+        "general": {
+            "frame_interval": 0.1,
+            "point_size": 5.0,
+            "lidar_tilt_deg": 30.0,
+            "lidar_invert_z": True
+        },
+        "ground": {
+            "ground_thresh": 0.03,
+            "calib_thresh": 0.02,
+            "distance_threshold": 0.015,
+            "ransac_n": 3,
+            "num_iterations": 300
+        },
+        "noise_filter": {"nb_neighbors": 20, "std_ratio": 2.0},
+        "cluster": {"eps": 0.1, "min_points": 6},
+        "adaptive_filter": {"min_thresh": 0.02, "max_thresh": 0.06, "scale_factor": 3.0},
+        "height_smoothing": {
+            "max_history": 20,
+            "guard_high": 1.3,
+            "guard_low": 0.7,
+            "ema_factor_new": 0.3,
+            "ema_factor_old": 0.7
+        },
+        "dimension_smoothing": {
+            "max_history": 20,
+            "deviation_guard": 0.15,
+            "ema_factor_length_new": 0.25,
+            "ema_factor_length_old": 0.75,
+            "ema_factor_width_new": 0.25,
+            "ema_factor_width_old": 0.75
+        }
+    }
+
+    if not os.path.exists(MEASURE_CONFIG_PATH):
+        with open(MEASURE_CONFIG_PATH, "w") as f:
+            json.dump(default, f, indent=2)
+        return default
+
+    try:
+        with open(MEASURE_CONFIG_PATH, "r") as f:
+            data = json.load(f)
+        for k, v in data.items():
+            if isinstance(v, dict) and k in default:
+                default[k].update(v)
+            else:
+                default[k] = v
+        print(f"[INFO] Loaded measure_config.json from {MEASURE_CONFIG_PATH}")
+        return default
+    except Exception as e:
+        print(f"[WARN] Gagal load measure_config.json: {e}")
+        return default
+
+
+def watch_measure_config(node):
+    """Pantau perubahan file konfigurasi dan reload otomatis."""
+    def mtime():
+        return os.path.getmtime(MEASURE_CONFIG_PATH) if os.path.exists(MEASURE_CONFIG_PATH) else 0
+    last = mtime()
+    while True:
+        time.sleep(2)
+        new = mtime()
+        if new != last:
+            last = new
+            print("[INFO] measure_config.json updated, reloading...")
+            node.measure_cfg = load_measure_config()
 
 
 def upload(p, l, t):
@@ -150,6 +220,22 @@ class LivoxGUI(Node):
     def __init__(self, app, p_val=None, l_val=None, t_val=None, data_event=None):
         global GUI_INSTANCE
         super().__init__("livox_open3d_gui")
+        # ==== Load konfigurasi JSON ====
+        self.measure_cfg = load_measure_config()
+
+        # Terapkan parameter umum
+        g = self.measure_cfg["general"]
+        self.frame_interval = g["frame_interval"]
+        self.point_size = g["point_size"]
+        self.set_lidar_orientation(g["lidar_tilt_deg"], g["lidar_invert_z"])
+
+        gr = self.measure_cfg["ground"]
+        self.ground_thresh = gr["ground_thresh"]
+        self.calib_thresh = gr["calib_thresh"]
+
+        # Jalankan watcher agar reload otomatis bila file JSON berubah
+        threading.Thread(target=watch_measure_config, args=(self,), daemon=True).start()
+
         qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             history=HistoryPolicy.KEEP_LAST,
@@ -204,7 +290,7 @@ class LivoxGUI(Node):
         self.show_ground_color = True         # hanya mematikan warna, bukan deteksi
         self.ground_model = None
         self.is_calibrating = False
-        self.ground_thresh = 0.1             # <— lebih ketat dari 0.08, bisa disesuaikan
+        self.ground_thresh = 0.03             # <— lebih ketat dari 0.08, bisa disesuaikan
         self.calib_thresh = 0.02              # RANSAC distance saat kalibrasi
 
         # Smoothing state
@@ -458,138 +544,130 @@ class LivoxGUI(Node):
 
     # ----------------- Stable dimension measure -----------------
     def measure_dims_stable(self, pts_in, assume_non_ground=False):
-        """
-        Dimensi stabil:
-        - (Opsional) segment ground ketat
-        - Buang noise
-        - Cluster DBSCAN (eps lebih ketat), gabungkan label valid
-        - P & L: PCA 2D pada XY (bukan axis-aligned)
-        - T: range persentil di sepanjang normal ground (jika ada), else Z
-        - Smoothing: median guard + EMA
-        Return: (P, L, T, obb or None) atau None.
-        """
+        cfg = self.measure_cfg
+        gnd = cfg["ground"]
+        nf = cfg["noise_filter"]
+        clu = cfg["cluster"]
+        adp = cfg["adaptive_filter"]
+        hs = cfg["height_smoothing"]
+        ds = cfg["dimension_smoothing"]
+
         if pts_in.shape[0] < 50:
             return None
 
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(pts_in)
 
-        # 1) Segment ground bila diminta
+        # --- Segmentasi ground ---
         work = pcd
+        ground_plane = None
         if not assume_non_ground:
-            plane_model, inliers = pcd.segment_plane(distance_threshold=0.015, ransac_n=3, num_iterations=300)
-            if len(inliers) >= 100:
-                work = pcd.select_by_index(inliers, invert=True)
+            try:
+                plane_model, inliers = pcd.segment_plane(
+                    distance_threshold=gnd["distance_threshold"],
+                    ransac_n=gnd["ransac_n"],
+                    num_iterations=gnd["num_iterations"]
+                )
+                if len(inliers) >= 100:
+                    ground_plane = plane_model
+                    work = pcd.select_by_index(inliers, invert=True)
+            except Exception as e:
+                self.get_logger().warn(f"Gagal segment ground: {e}")
 
         if work.is_empty():
             return None
 
-        # 2) Noise removal
-        work, _ = work.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
+        # --- Noise filter ---
+        work, _ = work.remove_statistical_outlier(
+            nb_neighbors=nf["nb_neighbors"], std_ratio=nf["std_ratio"]
+        )
         if work.is_empty():
             return None
 
-        # 3) Cluster & kumpulkan semua label valid (eps lebih ketat)
-        labels = np.array(work.cluster_dbscan(eps=0.1, min_points=6, print_progress=False))
+        # --- Cluster ---
+        labels = np.array(work.cluster_dbscan(
+            eps=clu["eps"], min_points=clu["min_points"], print_progress=False
+        ))
         if (labels >= 0).any():
             obj_points = np.asarray(work.points)[labels >= 0]
         else:
             obj_points = np.asarray(work.points)
+        if obj_points.shape[0] < 30:
+            return None
+
+        # --- Adaptive ground filter ---
+        if ground_plane is not None:
+            a, b, c, d = ground_plane
+            denom = np.sqrt(a**2 + b**2 + c**2) + 1e-9
+            heights = (a * obj_points[:, 0] + b * obj_points[:, 1] + c * obj_points[:, 2] + d) / denom
+            h_std = np.std(heights)
+            adaptive_thresh = max(adp["min_thresh"], min(adp["max_thresh"], adp["scale_factor"] * h_std))
+            obj_points = obj_points[heights > adaptive_thresh]
 
         if obj_points.shape[0] < 20:
             return None
 
-        # Anti-QHull degeneracy
-        obj_points = obj_points + np.random.normal(0, 1e-4, obj_points.shape)
-
-        # --- T (tinggi) di sepanjang normal ground (kalau ada) ---
-        if self.ground_model is not None:
-            a, b, c, d = self.ground_model
+        # --- Hitung tinggi ---
+        if ground_plane is not None:
+            a, b, c, d = ground_plane
             n = np.array([a, b, c], dtype=float)
             n_norm = np.linalg.norm(n) + 1e-12
-            # Signed distance (positif di atas bidang)
             h = (obj_points @ n + d) / n_norm
-            # Buang ekor 2% teratas & terbawah
-            h2, h98 = np.percentile(h, [0.1, 99.99])
+            h2, h98 = np.percentile(h, [1, 99])
             true_height = float(h98 - h2)
         else:
-            # fallback: pakai Z dunia tapi ketat
-            z2, z98 = np.percentile(obj_points[:, 2], [0.1, 99.99])
+            z2, z98 = np.percentile(obj_points[:, 2], [1, 99])
             true_height = float(z98 - z2)
 
-        # --- P & L dari PCA 2D (XY) ---
-            # --- P & L dari PCA 2D (XY) ---
-        XY = obj_points[:, :2]
-        mu = XY.mean(axis=0, keepdims=True)
-        Xc = XY - mu
+        # --- Smoothing tinggi ---
+        self._dim_hist_height.append(true_height)
+        if len(self._dim_hist_height) > hs["max_history"]:
+            self._dim_hist_height.pop(0)
+        median_h = float(np.median(self._dim_hist_height))
+        if true_height > hs["guard_high"] * median_h or true_height < hs["guard_low"] * median_h:
+            true_height = median_h
+        if self._last_height is not None:
+            true_height = hs["ema_factor_new"] * true_height + hs["ema_factor_old"] * self._last_height
+        self._last_height = true_height
 
-        # Tambahkan sedikit regularisasi supaya orientasi PCA tidak meloncat antar frame
+        # --- PCA panjang & lebar ---
+        XY = obj_points[:, :2]
+        Xc = XY - XY.mean(axis=0, keepdims=True)
         cov = np.cov(Xc.T)
         eigvals, eigvecs = np.linalg.eigh(cov)
-        # Urutkan eigenvalue menurun
-        order = np.argsort(eigvals)[::-1]
-        eigvecs = eigvecs[:, order]
+        eigvecs = eigvecs[:, np.argsort(eigvals)[::-1]]
 
-        # Simpan orientasi PCA agar bisa dismoothing antar frame
         if not hasattr(self, "_last_pca_vecs"):
             self._last_pca_vecs = eigvecs.copy()
         else:
-            # Exponential smoothing pada arah sumbu utama
-            self._last_pca_vecs = 0.2 * eigvecs + 0.8 * self._last_pca_vecs
-            # Orthonormalize ulang
+            self._last_pca_vecs = 0.3 * eigvecs + 0.7 * self._last_pca_vecs
             u, _, vt = np.linalg.svd(self._last_pca_vecs, full_matrices=False)
             self._last_pca_vecs = u @ vt
-        V = self._last_pca_vecs  # gunakan orientasi yang dismooth
 
-        # Proyeksikan ke sumbu PCA yang sudah stabil
-        proj = Xc @ V
-        # Persentil lebih ketat untuk tahan outlier
-        p_low, p_high = np.percentile(proj[:, 0], [1.0, 99.0])
-        q_low, q_high = np.percentile(proj[:, 1], [1.0, 99.0])
+        proj = Xc @ self._last_pca_vecs
+        p_low, p_high = np.percentile(proj[:, 0], [1, 99])
+        q_low, q_high = np.percentile(proj[:, 1], [1, 99])
         true_length = float(p_high - p_low)
-        true_width  = float(q_high - q_low)
+        true_width = float(q_high - q_low)
 
-        # Filter ukuran ekstrem antar frame
-        if hasattr(self, "_last_dims_raw"):
-            last_L, last_W = self._last_dims_raw
-            # Batasi lonjakan per frame maksimal 10%
-            true_length = np.clip(true_length, 0.9 * last_L, 1.1 * last_L)
-            true_width  = np.clip(true_width, 0.9 * last_W, 1.1 * last_W)
-        self._last_dims_raw = (true_length, true_width)
-
-
-        # --- Smoothing & guard seperti sebelumnya ---
-        # T
-        self._dim_hist_height.append(true_height)
-        if len(self._dim_hist_height) > 12:
-            self._dim_hist_height.pop(0)
-        median_h = float(np.median(self._dim_hist_height))
-
-        # Height guard ± (dua arah)
-        if true_height > 1.25 * median_h or true_height < 0.7 * median_h:
-            true_height = median_h
-
-        if self._last_height is not None:
-            true_height = 0.2 * true_height + 0.8 * self._last_height
-        self._last_height = true_height
-
-        # P & L
+        # --- Smoothing panjang & lebar ---
         self._dim_hist_xy.append([true_length, true_width])
-        if len(self._dim_hist_xy) > 50:
+        if len(self._dim_hist_xy) > ds["max_history"]:
             self._dim_hist_xy.pop(0)
         xy_med = np.median(self._dim_hist_xy, axis=0)
         p_corr, l_corr = true_length, true_width
-        # guard 15% deviasi
-        if abs(p_corr - xy_med[0]) > 0.15 * max(1e-6, xy_med[0]):
+        if abs(p_corr - xy_med[0]) > ds["deviation_guard"] * xy_med[0]:
             p_corr = float(xy_med[0])
-        if abs(l_corr - xy_med[1]) > 0.15 * max(1e-6, xy_med[1]):
+        if abs(l_corr - xy_med[1]) > ds["deviation_guard"] * xy_med[1]:
             l_corr = float(xy_med[1])
+
         if self._last_xy is not None:
-            p_corr = 0.2 * p_corr + 0.8 * float(self._last_xy[0])
-            l_corr = 0.2 * l_corr + 0.8 * float(self._last_xy[1])
+            p_corr = ds["ema_factor_length_new"] * p_corr + ds["ema_factor_length_old"] * self._last_xy[0]
+            l_corr = ds["ema_factor_width_new"] * l_corr + ds["ema_factor_width_old"] * self._last_xy[1]
+
         self._last_xy = np.array([p_corr, l_corr], dtype=np.float32)
 
-        # --- OBB hanya visual (tak dipakai ukur) ---
+        # --- Visualisasi OBB ---
         obb = None
         try:
             pcd_obj = o3d.geometry.PointCloud()
@@ -597,9 +675,11 @@ class LivoxGUI(Node):
             obb = pcd_obj.get_oriented_bounding_box()
             obb.color = (1.0, 1.0, 0.0)
         except Exception:
-            obb = None
+            pass
 
         return p_corr, l_corr, true_height, obb
+
+
 
     # ----------------- Callback ROS -----------------
     def cb(self, msg):
@@ -761,6 +841,22 @@ class LivoxCalib(Node):
     def __init__(self, app, p_val=None, l_val=None, t_val=None, data_event=None):
         global GUI_INSTANCE
         super().__init__("livox_open3d_calib")
+        # ==== Load konfigurasi JSON ====
+        self.measure_cfg = load_measure_config()
+
+        # Terapkan parameter umum
+        g = self.measure_cfg["general"]
+        self.frame_interval = g["frame_interval"]
+        self.point_size = g["point_size"]
+        self.set_lidar_orientation(g["lidar_tilt_deg"], g["lidar_invert_z"])
+
+        gr = self.measure_cfg["ground"]
+        self.ground_thresh = gr["ground_thresh"]
+        self.calib_thresh = gr["calib_thresh"]
+
+        # Jalankan watcher agar reload otomatis bila file JSON berubah
+        threading.Thread(target=watch_measure_config, args=(self,), daemon=True).start()
+
         qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             history=HistoryPolicy.KEEP_LAST,
@@ -815,7 +911,7 @@ class LivoxCalib(Node):
         self.show_ground_color = True         # hanya mematikan warna, bukan deteksi
         self.ground_model = None
         self.is_calibrating = False
-        self.ground_thresh = 0.1             # <— lebih ketat dari 0.08, bisa disesuaikan
+        self.ground_thresh = 0.03             # <— lebih ketat dari 0.08, bisa disesuaikan
         self.calib_thresh = 0.02              # RANSAC distance saat kalibrasi
 
         # Smoothing state
@@ -850,17 +946,17 @@ class LivoxCalib(Node):
 
         self.panel.add_child(gui.Label("ROI Box Controls"))
         self.panel.add_child(gui.Label("Position (m)"))
-        self.panel.add_child(self.make_plus_minus_row("X", "roi_center", 0, 0.1))
-        self.panel.add_child(self.make_plus_minus_row("Y", "roi_center", 1, 0.1))
-        self.panel.add_child(self.make_plus_minus_row("Z", "roi_center", 2, 0.1))
+        self.panel.add_child(self.make_plus_minus_row("X", "roi_center", 0, 0.05))
+        self.panel.add_child(self.make_plus_minus_row("Y", "roi_center", 1, 0.05))
+        self.panel.add_child(self.make_plus_minus_row("Z", "roi_center", 2, 0.05))
         self.panel.add_child(gui.Label("Size (m)"))
         self.panel.add_child(self.make_plus_minus_row("Size X", "roi_size", 0, 0.1))
         self.panel.add_child(self.make_plus_minus_row("Size Y", "roi_size", 1, 0.1))
         self.panel.add_child(self.make_plus_minus_row("Size Z", "roi_size", 2, 0.1))
         self.panel.add_child(gui.Label("Rotation (deg)"))
-        self.panel.add_child(self.make_plus_minus_row("Roll",  "roi_rpy", 0, 0.1))
-        self.panel.add_child(self.make_plus_minus_row("Pitch", "roi_rpy", 1, 0.1))
-        self.panel.add_child(self.make_plus_minus_row("Yaw",   "roi_rpy", 2, 0.1))
+        self.panel.add_child(self.make_plus_minus_row("Roll",  "roi_rpy", 0, 0.5))
+        self.panel.add_child(self.make_plus_minus_row("Pitch", "roi_rpy", 1, 0.5))
+        self.panel.add_child(self.make_plus_minus_row("Yaw",   "roi_rpy", 2, 0.5))
 
         # Buttons utama
         save_btn = gui.Button("Save ROI")
@@ -1047,135 +1143,130 @@ class LivoxCalib(Node):
 
     # ----------------- Stable dimension measure -----------------
     def measure_dims_stable(self, pts_in, assume_non_ground=False):
-        """
-        Dimensi stabil:
-        - (Opsional) segment ground ketat
-        - Buang noise
-        - Cluster DBSCAN (eps lebih ketat), gabungkan label valid
-        - P & L: PCA 2D pada XY (bukan axis-aligned)
-        - T: range persentil di sepanjang normal ground (jika ada), else Z
-        - Smoothing: median guard + EMA
-        Return: (P, L, T, obb or None) atau None.
-        """
+        cfg = self.measure_cfg
+        gnd = cfg["ground"]
+        nf = cfg["noise_filter"]
+        clu = cfg["cluster"]
+        adp = cfg["adaptive_filter"]
+        hs = cfg["height_smoothing"]
+        ds = cfg["dimension_smoothing"]
+
         if pts_in.shape[0] < 50:
             return None
 
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(pts_in)
 
-        # 1) Segment ground bila diminta
+        # --- Segmentasi ground ---
         work = pcd
+        ground_plane = None
         if not assume_non_ground:
-            plane_model, inliers = pcd.segment_plane(distance_threshold=0.015, ransac_n=3, num_iterations=300)
-            if len(inliers) >= 100:
-                work = pcd.select_by_index(inliers, invert=True)
+            try:
+                plane_model, inliers = pcd.segment_plane(
+                    distance_threshold=gnd["distance_threshold"],
+                    ransac_n=gnd["ransac_n"],
+                    num_iterations=gnd["num_iterations"]
+                )
+                if len(inliers) >= 100:
+                    ground_plane = plane_model
+                    work = pcd.select_by_index(inliers, invert=True)
+            except Exception as e:
+                self.get_logger().warn(f"Gagal segment ground: {e}")
 
         if work.is_empty():
             return None
 
-        # 2) Noise removal
-        work, _ = work.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
+        # --- Noise filter ---
+        work, _ = work.remove_statistical_outlier(
+            nb_neighbors=nf["nb_neighbors"], std_ratio=nf["std_ratio"]
+        )
         if work.is_empty():
             return None
 
-        # 3) Cluster & kumpulkan semua label valid (eps lebih ketat)
-        labels = np.array(work.cluster_dbscan(eps=2.0, min_points=4, print_progress=False))
+        # --- Cluster ---
+        labels = np.array(work.cluster_dbscan(
+            eps=clu["eps"], min_points=clu["min_points"], print_progress=False
+        ))
         if (labels >= 0).any():
             obj_points = np.asarray(work.points)[labels >= 0]
         else:
             obj_points = np.asarray(work.points)
+        if obj_points.shape[0] < 30:
+            return None
+
+        # --- Adaptive ground filter ---
+        if ground_plane is not None:
+            a, b, c, d = ground_plane
+            denom = np.sqrt(a**2 + b**2 + c**2) + 1e-9
+            heights = (a * obj_points[:, 0] + b * obj_points[:, 1] + c * obj_points[:, 2] + d) / denom
+            h_std = np.std(heights)
+            adaptive_thresh = max(adp["min_thresh"], min(adp["max_thresh"], adp["scale_factor"] * h_std))
+            obj_points = obj_points[heights > adaptive_thresh]
 
         if obj_points.shape[0] < 20:
             return None
 
-        # Anti-QHull degeneracy
-        obj_points = obj_points + np.random.normal(0, 1e-4, obj_points.shape)
-
-        # --- T (tinggi) di sepanjang normal ground (kalau ada) ---
-        if self.ground_model is not None:
-            a, b, c, d = self.ground_model
+        # --- Hitung tinggi ---
+        if ground_plane is not None:
+            a, b, c, d = ground_plane
             n = np.array([a, b, c], dtype=float)
             n_norm = np.linalg.norm(n) + 1e-12
-            # Signed distance (positif di atas bidang)
             h = (obj_points @ n + d) / n_norm
-            # Buang ekor 2% teratas & terbawah
-            h2, h98 = np.percentile(h, [0.1, 99.99])
+            h2, h98 = np.percentile(h, [1, 99])
             true_height = float(h98 - h2)
         else:
-            # fallback: pakai Z dunia tapi ketat
-            z2, z98 = np.percentile(obj_points[:, 2], [0.1, 99.99])
+            z2, z98 = np.percentile(obj_points[:, 2], [1, 99])
             true_height = float(z98 - z2)
 
-        # --- P & L dari PCA 2D (XY) ---
-            # --- P & L dari PCA 2D (XY) ---
-        XY = obj_points[:, :2]
-        mu = XY.mean(axis=0, keepdims=True)
-        Xc = XY - mu
+        # --- Smoothing tinggi ---
+        self._dim_hist_height.append(true_height)
+        if len(self._dim_hist_height) > hs["max_history"]:
+            self._dim_hist_height.pop(0)
+        median_h = float(np.median(self._dim_hist_height))
+        if true_height > hs["guard_high"] * median_h or true_height < hs["guard_low"] * median_h:
+            true_height = median_h
+        if self._last_height is not None:
+            true_height = hs["ema_factor_new"] * true_height + hs["ema_factor_old"] * self._last_height
+        self._last_height = true_height
 
-        # Tambahkan sedikit regularisasi supaya orientasi PCA tidak meloncat antar frame
+        # --- PCA panjang & lebar ---
+        XY = obj_points[:, :2]
+        Xc = XY - XY.mean(axis=0, keepdims=True)
         cov = np.cov(Xc.T)
         eigvals, eigvecs = np.linalg.eigh(cov)
-        # Urutkan eigenvalue menurun
-        order = np.argsort(eigvals)[::-1]
-        eigvecs = eigvecs[:, order]
+        eigvecs = eigvecs[:, np.argsort(eigvals)[::-1]]
 
-        # Simpan orientasi PCA agar bisa dismoothing antar frame
         if not hasattr(self, "_last_pca_vecs"):
             self._last_pca_vecs = eigvecs.copy()
         else:
-            # Exponential smoothing pada arah sumbu utama
-            self._last_pca_vecs = 0.2 * eigvecs + 0.8 * self._last_pca_vecs
-            # Orthonormalize ulang
+            self._last_pca_vecs = 0.3 * eigvecs + 0.7 * self._last_pca_vecs
             u, _, vt = np.linalg.svd(self._last_pca_vecs, full_matrices=False)
             self._last_pca_vecs = u @ vt
-        V = self._last_pca_vecs  # gunakan orientasi yang dismooth
 
-        # Proyeksikan ke sumbu PCA yang sudah stabil
-        proj = Xc @ V
-        # Persentil lebih ketat untuk tahan outlier
-        p_low, p_high = np.percentile(proj[:, 0], [0.1, 99.0])
-        q_low, q_high = np.percentile(proj[:, 1], [0.1, 99.0])
+        proj = Xc @ self._last_pca_vecs
+        p_low, p_high = np.percentile(proj[:, 0], [1, 99])
+        q_low, q_high = np.percentile(proj[:, 1], [1, 99])
         true_length = float(p_high - p_low)
-        true_width  = float(q_high - q_low)
+        true_width = float(q_high - q_low)
 
-        # Filter ukuran ekstrem antar frame
-        if hasattr(self, "_last_dims_raw"):
-            last_L, last_W = self._last_dims_raw
-            # Batasi lonjakan per frame maksimal 10%
-            true_length = np.clip(true_length, 0.9 * last_L, 1.1 * last_L)
-            true_width  = np.clip(true_width, 0.9 * last_W, 1.1 * last_W)
-        self._last_dims_raw = (true_length, true_width)
-
-
-        # --- Smoothing & guard seperti sebelumnya ---
-        # T
-        self._dim_hist_height.append(true_height)
-        if len(self._dim_hist_height) > 12:
-            self._dim_hist_height.pop(0)
-        median_h = float(np.median(self._dim_hist_height))
-        if true_height > 1.25 * median_h:   # guard outlier ke atas
-            true_height = median_h
-        if self._last_height is not None:
-            true_height = 0.33 * true_height + 0.75 * self._last_height
-        self._last_height = true_height
-
-        # P & L
+        # --- Smoothing panjang & lebar ---
         self._dim_hist_xy.append([true_length, true_width])
-        if len(self._dim_hist_xy) > 12:
+        if len(self._dim_hist_xy) > ds["max_history"]:
             self._dim_hist_xy.pop(0)
         xy_med = np.median(self._dim_hist_xy, axis=0)
         p_corr, l_corr = true_length, true_width
-        # guard 15% deviasi
-        if abs(p_corr - xy_med[0]) > 0.15 * max(1e-6, xy_med[0]):
+        if abs(p_corr - xy_med[0]) > ds["deviation_guard"] * xy_med[0]:
             p_corr = float(xy_med[0])
-        if abs(l_corr - xy_med[1]) > 0.15 * max(1e-6, xy_med[1]):
+        if abs(l_corr - xy_med[1]) > ds["deviation_guard"] * xy_med[1]:
             l_corr = float(xy_med[1])
+
         if self._last_xy is not None:
-            p_corr = 0.25 * p_corr + 0.75 * float(self._last_xy[0])
-            l_corr = 0.27 * l_corr + 0.75 * float(self._last_xy[1])
+            p_corr = ds["ema_factor_length_new"] * p_corr + ds["ema_factor_length_old"] * self._last_xy[0]
+            l_corr = ds["ema_factor_width_new"] * l_corr + ds["ema_factor_width_old"] * self._last_xy[1]
+
         self._last_xy = np.array([p_corr, l_corr], dtype=np.float32)
 
-        # --- OBB hanya visual (tak dipakai ukur) ---
+        # --- Visualisasi OBB ---
         obb = None
         try:
             pcd_obj = o3d.geometry.PointCloud()
@@ -1183,9 +1274,11 @@ class LivoxCalib(Node):
             obb = pcd_obj.get_oriented_bounding_box()
             obb.color = (1.0, 1.0, 0.0)
         except Exception:
-            obb = None
+            pass
 
         return p_corr, l_corr, true_height, obb
+
+
 
     # ----------------- Callback ROS -----------------
     def cb(self, msg):
