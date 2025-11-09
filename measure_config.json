@@ -1,7 +1,7 @@
 {
   "general": {
     "frame_interval": 0.1,
-    "point_size": 10.0,
+    "point_size": 5.0,
     "lidar_tilt_deg": 30.0,
     "lidar_invert_z": true
   },
@@ -21,7 +21,7 @@
 
   "cluster": {
     "eps": 0.1,
-    "min_points": 6
+    "min_points": 1000
   },
 
   "adaptive_filter": {
@@ -45,5 +45,26 @@
     "ema_factor_length_old": 0.75,
     "ema_factor_width_new": 0.25,
     "ema_factor_width_old": 0.75
-  }
+  },
+
+  "quality_gate": {
+    "min_score": 0.4
+  },
+
+  "height_guard": {
+    "min_factor": 0.65,
+    "max_factor": 1.45
+  },
+
+  "dimension_guard": {
+    "min_factor": 0.75,
+    "max_factor": 1.25
+  },
+
+  "correction_matrix": {
+    "L": [1.73118631, -0.99775355, -0.00802691],
+    "T": [-0.94557996, 1.70870925, 0.22837981]
+  },
+
+  "info": "Konfigurasi ini digunakan untuk sistem deteksi LiDAR pada Livox MID360 Viewer. Parameter smoothing, guard, dan koreksi linier L↔T berasal dari hasil kalibrasi 10 sampel (2025-11-09). Nilai koreksi meningkatkan akurasi L dan T tanpa mempengaruhi P."
 }

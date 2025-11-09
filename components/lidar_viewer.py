@@ -543,14 +543,13 @@ class LivoxGUI(Node):
         self.show_toast("ROI di-reset")
 
     # ----------------- Stable dimension measure -----------------
+   
     def measure_dims_stable(self, pts_in, assume_non_ground=False):
+        """Mengukur dimensi objek dengan auto-adaptive parameter (tanpa tuning manual)."""
         cfg = self.measure_cfg
         gnd = cfg["ground"]
-        nf = cfg["noise_filter"]
+        nf  = cfg["noise_filter"]
         clu = cfg["cluster"]
-        adp = cfg["adaptive_filter"]
-        hs = cfg["height_smoothing"]
-        ds = cfg["dimension_smoothing"]
 
         if pts_in.shape[0] < 50:
             return None
@@ -558,7 +557,7 @@ class LivoxGUI(Node):
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(pts_in)
 
-        # --- Segmentasi ground ---
+        # --- 1) Segmentasi ground (RANSAC) ---
         work = pcd
         ground_plane = None
         if not assume_non_ground:
@@ -577,14 +576,14 @@ class LivoxGUI(Node):
         if work.is_empty():
             return None
 
-        # --- Noise filter ---
+        # --- 2) Noise filter ---
         work, _ = work.remove_statistical_outlier(
             nb_neighbors=nf["nb_neighbors"], std_ratio=nf["std_ratio"]
         )
         if work.is_empty():
             return None
 
-        # --- Cluster ---
+        # --- 3) Cluster ---
         labels = np.array(work.cluster_dbscan(
             eps=clu["eps"], min_points=clu["min_points"], print_progress=False
         ))
@@ -595,79 +594,105 @@ class LivoxGUI(Node):
         if obj_points.shape[0] < 30:
             return None
 
-        # --- Adaptive ground filter ---
-        if ground_plane is not None:
-            a, b, c, d = ground_plane
-            denom = np.sqrt(a**2 + b**2 + c**2) + 1e-9
-            heights = (a * obj_points[:, 0] + b * obj_points[:, 1] + c * obj_points[:, 2] + d) / denom
-            h_std = np.std(heights)
-            adaptive_thresh = max(adp["min_thresh"], min(adp["max_thresh"], adp["scale_factor"] * h_std))
-            obj_points = obj_points[heights > adaptive_thresh]
+        # --- 4) Estimasi kasar dimensi (tanpa smoothing dulu) ---
+        # Tinggi kasar (persentil robust)
+        z2, z98   = np.percentile(obj_points[:, 2], [1, 99])
+        height_raw = float(z98 - z2)
 
-        if obj_points.shape[0] < 20:
-            return None
-
-        # --- Hitung tinggi ---
-        if ground_plane is not None:
-            a, b, c, d = ground_plane
-            n = np.array([a, b, c], dtype=float)
-            n_norm = np.linalg.norm(n) + 1e-12
-            h = (obj_points @ n + d) / n_norm
-            h2, h98 = np.percentile(h, [1, 99])
-            true_height = float(h98 - h2)
-        else:
-            z2, z98 = np.percentile(obj_points[:, 2], [1, 99])
-            true_height = float(z98 - z2)
-
-        # --- Smoothing tinggi ---
-        self._dim_hist_height.append(true_height)
-        if len(self._dim_hist_height) > hs["max_history"]:
-            self._dim_hist_height.pop(0)
-        median_h = float(np.median(self._dim_hist_height))
-        if true_height > hs["guard_high"] * median_h or true_height < hs["guard_low"] * median_h:
-            true_height = median_h
-        if self._last_height is not None:
-            true_height = hs["ema_factor_new"] * true_height + hs["ema_factor_old"] * self._last_height
-        self._last_height = true_height
-
-        # --- PCA panjang & lebar ---
+        # PCA 2D pada XY (sudah di-center)
         XY = obj_points[:, :2]
         Xc = XY - XY.mean(axis=0, keepdims=True)
         cov = np.cov(Xc.T)
         eigvals, eigvecs = np.linalg.eigh(cov)
         eigvecs = eigvecs[:, np.argsort(eigvals)[::-1]]
 
-        if not hasattr(self, "_last_pca_vecs"):
-            self._last_pca_vecs = eigvecs.copy()
-        else:
-            self._last_pca_vecs = 0.3 * eigvecs + 0.7 * self._last_pca_vecs
-            u, _, vt = np.linalg.svd(self._last_pca_vecs, full_matrices=False)
-            self._last_pca_vecs = u @ vt
+        # ---- PCA-lock anti-flip TANPA perlu ubah __init__
+        if not hasattr(self, "_eigvecs_prev"):
+            self._eigvecs_prev = None
+        if self._eigvecs_prev is not None:
+            if np.dot(eigvecs[:, 0], self._eigvecs_prev[:, 0]) < 0:
+                eigvecs[:, 0] *= -1
+            if np.dot(eigvecs[:, 1], self._eigvecs_prev[:, 1]) < 0:
+                eigvecs[:, 1] *= -1
+        self._eigvecs_prev = eigvecs.copy()
 
-        proj = Xc @ self._last_pca_vecs
+        proj = Xc @ eigvecs
         p_low, p_high = np.percentile(proj[:, 0], [1, 99])
         q_low, q_high = np.percentile(proj[:, 1], [1, 99])
-        true_length = float(p_high - p_low)
-        true_width = float(q_high - q_low)
+        length_raw = float(p_high - p_low)
+        width_raw  = float(q_high - q_low)
 
-        # --- Smoothing panjang & lebar ---
-        self._dim_hist_xy.append([true_length, true_width])
-        if len(self._dim_hist_xy) > ds["max_history"]:
+        # Anti-swap label jika minor > major
+        if width_raw > length_raw:
+            length_raw, width_raw = width_raw, length_raw
+
+        # --- 5) Skala adaptif (pakai skema existing, tetap kompatibel)
+        scale_ref   = max(length_raw, width_raw, height_raw)
+        scale_factor = np.clip(scale_ref / 5.0, 0.5, 2.0)
+
+        base_hs = cfg["height_smoothing"]
+        base_ds = cfg["dimension_smoothing"]
+
+        ema_height_new = np.clip(base_hs["ema_factor_new"] * scale_factor, 0.1, 0.6)
+        ema_height_old = 1.0 - ema_height_new
+        ema_length_new = np.clip(base_ds["ema_factor_length_new"] * scale_factor, 0.1, 0.6)
+        ema_length_old = 1.0 - ema_length_new
+        ema_width_new  = np.clip(base_ds["ema_factor_width_new"] * scale_factor, 0.1, 0.6)
+        ema_width_old  = 1.0 - ema_width_new
+
+        guard_high = np.clip(base_hs["guard_high"] + 0.2 * (scale_factor - 1.0), 1.0, 1.6)
+        guard_low  = np.clip(base_hs["guard_low"]  - 0.1 * (scale_factor - 1.0), 0.5, 0.9)
+
+        # --- 6) Hitung tinggi sebenarnya (pakai model ground bila ada) ---
+        if ground_plane is not None:
+            a, b, c, d = ground_plane
+            n = np.array([a, b, c], dtype=float)
+            n_norm = np.linalg.norm(n) + 1e-12
+            hvals = (obj_points @ n + d) / n_norm
+            h2, h98 = np.percentile(hvals, [1, 99])
+            true_height = float(h98 - h2)
+        else:
+            true_height = height_raw
+
+        # --- 7) Smoothing T (pakai buffer & EMA yang SUDAH ada) ---
+        self._dim_hist_height.append(true_height)
+        if len(self._dim_hist_height) > base_hs["max_history"]:
+            self._dim_hist_height.pop(0)
+        median_h = float(np.median(self._dim_hist_height))
+        if true_height > guard_high * median_h or true_height < guard_low * median_h:
+            true_height = median_h
+        if self._last_height is not None:
+            true_height = ema_height_new * true_height + ema_height_old * self._last_height
+        self._last_height = true_height
+
+        # --- 8) Smoothing P & L (pakai buffer & EMA yang SUDAH ada) ---
+        self._dim_hist_xy.append([length_raw, width_raw])
+        if len(self._dim_hist_xy) > base_ds["max_history"]:
             self._dim_hist_xy.pop(0)
         xy_med = np.median(self._dim_hist_xy, axis=0)
-        p_corr, l_corr = true_length, true_width
-        if abs(p_corr - xy_med[0]) > ds["deviation_guard"] * xy_med[0]:
+        p_corr, l_corr = length_raw, width_raw
+        if abs(p_corr - xy_med[0]) > base_ds["deviation_guard"] * max(1e-6, xy_med[0]):
             p_corr = float(xy_med[0])
-        if abs(l_corr - xy_med[1]) > ds["deviation_guard"] * xy_med[1]:
+        if abs(l_corr - xy_med[1]) > base_ds["deviation_guard"] * max(1e-6, xy_med[1]):
             l_corr = float(xy_med[1])
-
         if self._last_xy is not None:
-            p_corr = ds["ema_factor_length_new"] * p_corr + ds["ema_factor_length_old"] * self._last_xy[0]
-            l_corr = ds["ema_factor_width_new"] * l_corr + ds["ema_factor_width_old"] * self._last_xy[1]
-
+            p_corr = ema_length_new * p_corr + ema_length_old * self._last_xy[0]
+            l_corr = ema_width_new  * l_corr + ema_width_old  * self._last_xy[1]
         self._last_xy = np.array([p_corr, l_corr], dtype=np.float32)
 
-        # --- Visualisasi OBB ---
+        # --- 9) Koreksi linier L & T (biarkan P apa adanya) ---
+        # Ambil dari config bila ada, kalau tidak fallback ke konstanta kalibrasi
+        cm = cfg.get("correction_matrix", {})
+        cL = cm.get("L", [1.73118631, -0.99775355, -0.00802691])
+        cT = cm.get("T", [-0.94557996,  1.70870925,  0.22837981])
+
+        L_det, T_det = float(l_corr), float(self._last_height if self._last_height is not None else true_height)
+        L_corr = cL[0]*L_det + cL[1]*T_det + cL[2]
+        T_corr = cT[0]*L_det + cT[1]*T_det + cT[2]
+        L_corr = float(np.clip(L_corr, 0.05, 50.0))
+        T_corr = float(np.clip(T_corr, 0.05, 50.0))
+
+        # --- 10) (Optional) OBB untuk visualisasi (tetap seperti semula) ---
         obb = None
         try:
             pcd_obj = o3d.geometry.PointCloud()
@@ -677,7 +702,7 @@ class LivoxGUI(Node):
         except Exception:
             pass
 
-        return p_corr, l_corr, true_height, obb
+        return float(p_corr), float(L_corr), float(T_corr), obb
 
 
 
@@ -1143,13 +1168,11 @@ class LivoxCalib(Node):
 
     # ----------------- Stable dimension measure -----------------
     def measure_dims_stable(self, pts_in, assume_non_ground=False):
+        """Mengukur dimensi objek dengan auto-adaptive parameter (tanpa tuning manual)."""
         cfg = self.measure_cfg
         gnd = cfg["ground"]
-        nf = cfg["noise_filter"]
+        nf  = cfg["noise_filter"]
         clu = cfg["cluster"]
-        adp = cfg["adaptive_filter"]
-        hs = cfg["height_smoothing"]
-        ds = cfg["dimension_smoothing"]
 
         if pts_in.shape[0] < 50:
             return None
@@ -1157,7 +1180,7 @@ class LivoxCalib(Node):
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(pts_in)
 
-        # --- Segmentasi ground ---
+        # --- 1) Segmentasi ground (RANSAC) ---
         work = pcd
         ground_plane = None
         if not assume_non_ground:
@@ -1176,14 +1199,14 @@ class LivoxCalib(Node):
         if work.is_empty():
             return None
 
-        # --- Noise filter ---
+        # --- 2) Noise filter ---
         work, _ = work.remove_statistical_outlier(
             nb_neighbors=nf["nb_neighbors"], std_ratio=nf["std_ratio"]
         )
         if work.is_empty():
             return None
 
-        # --- Cluster ---
+        # --- 3) Cluster ---
         labels = np.array(work.cluster_dbscan(
             eps=clu["eps"], min_points=clu["min_points"], print_progress=False
         ))
@@ -1194,79 +1217,105 @@ class LivoxCalib(Node):
         if obj_points.shape[0] < 30:
             return None
 
-        # --- Adaptive ground filter ---
-        if ground_plane is not None:
-            a, b, c, d = ground_plane
-            denom = np.sqrt(a**2 + b**2 + c**2) + 1e-9
-            heights = (a * obj_points[:, 0] + b * obj_points[:, 1] + c * obj_points[:, 2] + d) / denom
-            h_std = np.std(heights)
-            adaptive_thresh = max(adp["min_thresh"], min(adp["max_thresh"], adp["scale_factor"] * h_std))
-            obj_points = obj_points[heights > adaptive_thresh]
+        # --- 4) Estimasi kasar dimensi (tanpa smoothing dulu) ---
+        # Tinggi kasar (persentil robust)
+        z2, z98   = np.percentile(obj_points[:, 2], [1, 99])
+        height_raw = float(z98 - z2)
 
-        if obj_points.shape[0] < 20:
-            return None
-
-        # --- Hitung tinggi ---
-        if ground_plane is not None:
-            a, b, c, d = ground_plane
-            n = np.array([a, b, c], dtype=float)
-            n_norm = np.linalg.norm(n) + 1e-12
-            h = (obj_points @ n + d) / n_norm
-            h2, h98 = np.percentile(h, [1, 99])
-            true_height = float(h98 - h2)
-        else:
-            z2, z98 = np.percentile(obj_points[:, 2], [1, 99])
-            true_height = float(z98 - z2)
-
-        # --- Smoothing tinggi ---
-        self._dim_hist_height.append(true_height)
-        if len(self._dim_hist_height) > hs["max_history"]:
-            self._dim_hist_height.pop(0)
-        median_h = float(np.median(self._dim_hist_height))
-        if true_height > hs["guard_high"] * median_h or true_height < hs["guard_low"] * median_h:
-            true_height = median_h
-        if self._last_height is not None:
-            true_height = hs["ema_factor_new"] * true_height + hs["ema_factor_old"] * self._last_height
-        self._last_height = true_height
-
-        # --- PCA panjang & lebar ---
+        # PCA 2D pada XY (sudah di-center)
         XY = obj_points[:, :2]
         Xc = XY - XY.mean(axis=0, keepdims=True)
         cov = np.cov(Xc.T)
         eigvals, eigvecs = np.linalg.eigh(cov)
         eigvecs = eigvecs[:, np.argsort(eigvals)[::-1]]
 
-        if not hasattr(self, "_last_pca_vecs"):
-            self._last_pca_vecs = eigvecs.copy()
-        else:
-            self._last_pca_vecs = 0.3 * eigvecs + 0.7 * self._last_pca_vecs
-            u, _, vt = np.linalg.svd(self._last_pca_vecs, full_matrices=False)
-            self._last_pca_vecs = u @ vt
+        # ---- PCA-lock anti-flip TANPA perlu ubah __init__
+        if not hasattr(self, "_eigvecs_prev"):
+            self._eigvecs_prev = None
+        if self._eigvecs_prev is not None:
+            if np.dot(eigvecs[:, 0], self._eigvecs_prev[:, 0]) < 0:
+                eigvecs[:, 0] *= -1
+            if np.dot(eigvecs[:, 1], self._eigvecs_prev[:, 1]) < 0:
+                eigvecs[:, 1] *= -1
+        self._eigvecs_prev = eigvecs.copy()
 
-        proj = Xc @ self._last_pca_vecs
+        proj = Xc @ eigvecs
         p_low, p_high = np.percentile(proj[:, 0], [1, 99])
         q_low, q_high = np.percentile(proj[:, 1], [1, 99])
-        true_length = float(p_high - p_low)
-        true_width = float(q_high - q_low)
+        length_raw = float(p_high - p_low)
+        width_raw  = float(q_high - q_low)
 
-        # --- Smoothing panjang & lebar ---
-        self._dim_hist_xy.append([true_length, true_width])
-        if len(self._dim_hist_xy) > ds["max_history"]:
+        # Anti-swap label jika minor > major
+        if width_raw > length_raw:
+            length_raw, width_raw = width_raw, length_raw
+
+        # --- 5) Skala adaptif (pakai skema existing, tetap kompatibel)
+        scale_ref   = max(length_raw, width_raw, height_raw)
+        scale_factor = np.clip(scale_ref / 5.0, 0.5, 2.0)
+
+        base_hs = cfg["height_smoothing"]
+        base_ds = cfg["dimension_smoothing"]
+
+        ema_height_new = np.clip(base_hs["ema_factor_new"] * scale_factor, 0.1, 0.6)
+        ema_height_old = 1.0 - ema_height_new
+        ema_length_new = np.clip(base_ds["ema_factor_length_new"] * scale_factor, 0.1, 0.6)
+        ema_length_old = 1.0 - ema_length_new
+        ema_width_new  = np.clip(base_ds["ema_factor_width_new"] * scale_factor, 0.1, 0.6)
+        ema_width_old  = 1.0 - ema_width_new
+
+        guard_high = np.clip(base_hs["guard_high"] + 0.2 * (scale_factor - 1.0), 1.0, 1.6)
+        guard_low  = np.clip(base_hs["guard_low"]  - 0.1 * (scale_factor - 1.0), 0.5, 0.9)
+
+        # --- 6) Hitung tinggi sebenarnya (pakai model ground bila ada) ---
+        if ground_plane is not None:
+            a, b, c, d = ground_plane
+            n = np.array([a, b, c], dtype=float)
+            n_norm = np.linalg.norm(n) + 1e-12
+            hvals = (obj_points @ n + d) / n_norm
+            h2, h98 = np.percentile(hvals, [1, 99])
+            true_height = float(h98 - h2)
+        else:
+            true_height = height_raw
+
+        # --- 7) Smoothing T (pakai buffer & EMA yang SUDAH ada) ---
+        self._dim_hist_height.append(true_height)
+        if len(self._dim_hist_height) > base_hs["max_history"]:
+            self._dim_hist_height.pop(0)
+        median_h = float(np.median(self._dim_hist_height))
+        if true_height > guard_high * median_h or true_height < guard_low * median_h:
+            true_height = median_h
+        if self._last_height is not None:
+            true_height = ema_height_new * true_height + ema_height_old * self._last_height
+        self._last_height = true_height
+
+        # --- 8) Smoothing P & L (pakai buffer & EMA yang SUDAH ada) ---
+        self._dim_hist_xy.append([length_raw, width_raw])
+        if len(self._dim_hist_xy) > base_ds["max_history"]:
             self._dim_hist_xy.pop(0)
         xy_med = np.median(self._dim_hist_xy, axis=0)
-        p_corr, l_corr = true_length, true_width
-        if abs(p_corr - xy_med[0]) > ds["deviation_guard"] * xy_med[0]:
+        p_corr, l_corr = length_raw, width_raw
+        if abs(p_corr - xy_med[0]) > base_ds["deviation_guard"] * max(1e-6, xy_med[0]):
             p_corr = float(xy_med[0])
-        if abs(l_corr - xy_med[1]) > ds["deviation_guard"] * xy_med[1]:
+        if abs(l_corr - xy_med[1]) > base_ds["deviation_guard"] * max(1e-6, xy_med[1]):
             l_corr = float(xy_med[1])
-
         if self._last_xy is not None:
-            p_corr = ds["ema_factor_length_new"] * p_corr + ds["ema_factor_length_old"] * self._last_xy[0]
-            l_corr = ds["ema_factor_width_new"] * l_corr + ds["ema_factor_width_old"] * self._last_xy[1]
-
+            p_corr = ema_length_new * p_corr + ema_length_old * self._last_xy[0]
+            l_corr = ema_width_new  * l_corr + ema_width_old  * self._last_xy[1]
         self._last_xy = np.array([p_corr, l_corr], dtype=np.float32)
 
-        # --- Visualisasi OBB ---
+        # --- 9) Koreksi linier L & T (biarkan P apa adanya) ---
+        # Ambil dari config bila ada, kalau tidak fallback ke konstanta kalibrasi
+        cm = cfg.get("correction_matrix", {})
+        cL = cm.get("L", [1.73118631, -0.99775355, -0.00802691])
+        cT = cm.get("T", [-0.94557996,  1.70870925,  0.22837981])
+
+        L_det, T_det = float(l_corr), float(self._last_height if self._last_height is not None else true_height)
+        L_corr = cL[0]*L_det + cL[1]*T_det + cL[2]
+        T_corr = cT[0]*L_det + cT[1]*T_det + cT[2]
+        L_corr = float(np.clip(L_corr, 0.05, 50.0))
+        T_corr = float(np.clip(T_corr, 0.05, 50.0))
+
+        # --- 10) (Optional) OBB untuk visualisasi (tetap seperti semula) ---
         obb = None
         try:
             pcd_obj = o3d.geometry.PointCloud()
@@ -1276,7 +1325,7 @@ class LivoxCalib(Node):
         except Exception:
             pass
 
-        return p_corr, l_corr, true_height, obb
+        return float(p_corr), float(L_corr), float(T_corr), obb
 
 
 
