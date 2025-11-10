@@ -8,10 +8,7 @@
 
   "ground": {
     "ground_thresh": 0.03,
-    "calib_thresh": 0.02,
-    "distance_threshold": 0.015,
-    "ransac_n": 3,
-    "num_iterations": 300
+    "calib_thresh": 0.02
   },
 
   "noise_filter": {
@@ -20,51 +17,24 @@
   },
 
   "cluster": {
-    "eps": 0.1,
-    "min_points": 1000
-  },
-
-  "adaptive_filter": {
-    "min_thresh": 0.02,
-    "max_thresh": 0.06,
-    "scale_factor": 3.0
+    "eps": 0.2,
+    "min_points": 10
   },
 
   "height_smoothing": {
-    "max_history": 20,
-    "guard_high": 1.3,
+    "max_history": 5,
+    "guard_high": 1.25,
     "guard_low": 0.7,
-    "ema_factor_new": 0.3,
-    "ema_factor_old": 0.7
+    "ema_factor_new": 0.2,
+    "ema_factor_old": 0.8
   },
 
   "dimension_smoothing": {
-    "max_history": 20,
+    "max_history": 5,
     "deviation_guard": 0.15,
-    "ema_factor_length_new": 0.25,
-    "ema_factor_length_old": 0.75,
-    "ema_factor_width_new": 0.25,
-    "ema_factor_width_old": 0.75
-  },
-
-  "quality_gate": {
-    "min_score": 0.4
-  },
-
-  "height_guard": {
-    "min_factor": 0.65,
-    "max_factor": 1.45
-  },
-
-  "dimension_guard": {
-    "min_factor": 0.75,
-    "max_factor": 1.25
-  },
-
-  "correction_matrix": {
-    "L": [1.73118631, -0.99775355, -0.00802691],
-    "T": [-0.94557996, 1.70870925, 0.22837981]
-  },
-
-  "info": "Konfigurasi ini digunakan untuk sistem deteksi LiDAR pada Livox MID360 Viewer. Parameter smoothing, guard, dan koreksi linier L↔T berasal dari hasil kalibrasi 10 sampel (2025-11-09). Nilai koreksi meningkatkan akurasi L dan T tanpa mempengaruhi P."
+    "ema_factor_length_new": 0.15,
+    "ema_factor_length_old": 0.82,
+    "ema_factor_width_new": 0.15,
+    "ema_factor_width_old": 0.82
+  }
 }
