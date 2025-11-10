@@ -22,7 +22,7 @@
   },
 
   "height_smoothing": {
-    "max_history": 5,
+    "max_history": 500,
     "guard_high": 1.25,
     "guard_low": 0.7,
     "ema_factor_new": 0.2,
@@ -30,11 +30,11 @@
   },
 
   "dimension_smoothing": {
-    "max_history": 5,
+    "max_history": 500,
     "deviation_guard": 0.15,
     "ema_factor_length_new": 0.15,
-    "ema_factor_length_old": 0.82,
+    "ema_factor_length_old": 0.8,
     "ema_factor_width_new": 0.15,
-    "ema_factor_width_old": 0.82
+    "ema_factor_width_old": 0.8
   }
 }
