@@ -10,15 +10,26 @@ import customtkinter as ctk
 import open3d.visualization.gui as gui
 import components.message_box as message
 import components.calibrate_tab_content as right
+from rclpy.executors import MultiThreadedExecutor
+from multiprocessing import Process, Value, Event
 from components.db_config import init, get_conf, save_conf
 
-def run_open3d_viewer():
+PROCESS = []
+
+P_VAL = Value('d', 0.0)
+L_VAL = Value('d', 0.0)
+T_VAL = Value('d', 0.0)
+DATA_EVENT = Event()
+
+def run_open3d_viewer(p_val, l_val, t_val, data_event):
     rclpy.init()
     app = gui.Application.instance
     app.initialize()
 
-    node = LivoxCalib(app)
-    ros_thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
+    node = LivoxCalib(app, p_val=p_val, l_val=l_val, t_val=t_val, data_event=data_event)
+    exec = MultiThreadedExecutor()
+    exec.add_node(node)
+    ros_thread = threading.Thread(target=exec.spin, args=(node,), daemon=True)
     ros_thread.start()
     
     app.run()
@@ -28,8 +39,10 @@ def run_open3d_viewer():
     ros_thread.join()
 
 def open3d_thread():
-    p = Process(target=run_open3d_viewer)
+    p = Process(target=run_open3d_viewer, args=(P_VAL, L_VAL, T_VAL, DATA_EVENT))
+    PROCESS.append(p)
     p.start()
+    return p
 
 class Tabview(ctk.CTkFrame) :
     def __init__(self, parent, show_page) :

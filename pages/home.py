@@ -10,8 +10,9 @@ import components.header as header
 import open3d.visualization.gui as gui
 import components.connection_check as connection_check
 
-from multiprocessing import Process, Value, Event
 from components.lidar_viewer import LivoxGUI
+from rclpy.executors import MultiThreadedExecutor
+from multiprocessing import Process, Value, Event
 
 # DIMENSION_QUEUE = Queue(maxsize=1000)
 PROCESS = []
@@ -41,7 +42,9 @@ def run_open3d_viewer(p_val, l_val, t_val, data_event):
     app.initialize()
 
     node = LivoxGUI(app, p_val=p_val, l_val=l_val, t_val=t_val, data_event=data_event)
-    ros_thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
+    exec = MultiThreadedExecutor()
+    exec.add_node(node)
+    ros_thread = threading.Thread(target=exec.spin, args=(node,), daemon=True)
     ros_thread.start()
     
     app.run()
