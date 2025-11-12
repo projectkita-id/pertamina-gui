@@ -130,78 +130,21 @@ def upload(p, l, t):
                     id INT AUTO_INCREMENT PRIMARY KEY,
                     panjang FLOAT NOT NULL,
                     lebar FLOAT NOT NULL,
-                    tinggi FLOAT NOT NULL,
-                    timestamp DATETIME NOT NULL
+                    tinggi FLOAT NOT NULL
                 )
             """)
             conn.commit()
 
-            timestamp = datetime.now()
-            cursor.execute("""
-                INSERT INTO data (panjang, lebar, tinggi, timestamp)
-                VALUES (%s, %s, %s, %s)
-            """, (round(p, 2), round(l, 2), round(t, 2), timestamp))
-            conn.commit()
-            print(f"[INFO] Data dikirim ke DB: P={round(p, 2)}, L={round(l, 2)}, T={round(t, 2)}, Timestamp={timestamp}")
-            LAST_SEND = current_time
-            break  # Sukses, keluar loop
-        except pymysql.MySQLError as e:
-            retries -= 1
-            print(f"[ERROR] Gagal mengirim data ke database (retry {3-retries}): {str(e)}")
-            if retries == 0:
-                print("[ERROR] Max retry reached, skipping upload")
-            time.sleep(1)  # Delay sedikit sebelum retry
-        finally:
-            if conn:
-                conn.close()
-
-def upload(p, l, t):
-    global LAST_SEND
-    current_time = time.time()
-    if current_time - LAST_SEND < 5:
-        print("[INFO] Melewati upload data untuk menghindari pengiriman berlebih.")
-        return
-
-    config = get_conf(["address", "username", "password", "port", "db_name"])
-    if not all(config):
-        print("[ERROR] Database configuration is incomplete.")
-        return
-    
-    address, username, password, port, db_name = config
-    port = int(port) if port else 3306
-
-    conn = None
-    retries = 3  # Max retry kalau timeout
-    while retries > 0:
-        try:
-            conn = pymysql.connect(
-                host=address,
-                user=username,
-                password=password,
-                port=port,
-                database=db_name,
-                charset='utf8mb4',
-                cursorclass=pymysql.cursors.DictCursor,
-                connect_timeout=10  # Timeout connect 10 detik (default infinite, bikin lelet)
-            )
-            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM data WHERE id = 1")
+            if cursor.fetchone() is None:
+                cursor.execute("INSERT INTO data (id, panjang, lebar, tinggi) VALUES (1, 0, 0, 0)")
+                conn.commit()
 
             cursor.execute("""
-                CREATE TABLE IF NOT EXISTS data (
-                    id INT AUTO_INCREMENT PRIMARY KEY,
-                    panjang FLOAT NOT NULL,
-                    lebar FLOAT NOT NULL,
-                    tinggi FLOAT NOT NULL,
-                    timestamp DATETIME NOT NULL
-                )
-            """)
-            conn.commit()
-
-            timestamp = datetime.now()
-            cursor.execute("""
-                INSERT INTO data (panjang, lebar, tinggi, timestamp)
-                VALUES (%s, %s, %s, %s)
-            """, (round(p, 2), round(l, 2), round(t, 2), timestamp))
+                UPDATE data
+                SET panjang=%s, lebar=%s, tinggi=%s
+                WHERE id=1
+            """, (round(p, 2), round(l, 2), round(t, 2)))
             conn.commit()
             print(f"[INFO] Data dikirim ke DB: P={round(p, 2)}, L={round(l, 2)}, T={round(t, 2)}, Timestamp={timestamp}")
             LAST_SEND = current_time
