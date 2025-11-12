@@ -42,9 +42,7 @@ def run_open3d_viewer(p_val, l_val, t_val, data_event):
     app.initialize()
 
     node = LivoxGUI(app, p_val=p_val, l_val=l_val, t_val=t_val, data_event=data_event)
-    exec = MultiThreadedExecutor()
-    exec.add_node(node)
-    ros_thread = threading.Thread(target=exec.spin, args=(node,), daemon=True)
+    ros_thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
     ros_thread.start()
     
     app.run()
