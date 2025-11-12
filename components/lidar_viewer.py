@@ -146,7 +146,7 @@ def upload(p, l, t):
                 WHERE id=1
             """, (round(p, 2), round(l, 2), round(t, 2)))
             conn.commit()
-            print(f"[INFO] Data dikirim ke DB: P={round(p, 2)}, L={round(l, 2)}, T={round(t, 2)}, Timestamp={timestamp}")
+            print(f"[INFO] Data dikirim ke DB: P={round(p, 2)}, L={round(l, 2)}, T={round(t, 2)}")
             LAST_SEND = current_time
             break  # Sukses, keluar loop
         except pymysql.MySQLError as e:
