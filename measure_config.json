@@ -17,7 +17,7 @@
   },
 
   "cluster": {
-    "eps": 0.2,
+    "eps": 0.5,
     "min_points": 10
   },
 
@@ -32,9 +32,9 @@
   "dimension_smoothing": {
     "max_history": 500,
     "deviation_guard": 0.15,
-    "ema_factor_length_new": 0.15,
+    "ema_factor_length_new": 0.2,
     "ema_factor_length_old": 0.8,
-    "ema_factor_width_new": 0.15,
+    "ema_factor_width_new": 0.2,
     "ema_factor_width_old": 0.8
   }
 }

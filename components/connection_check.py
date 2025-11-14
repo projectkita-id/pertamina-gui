@@ -4,7 +4,7 @@ import mysql.connector
 import components.message_box as message
 from components.db_config import get_conf
 
-def lidar_check(ip="192.168.1.190", port=56300, timeout=2):
+def lidar_check(ip="10.12.32.10", port=56300, timeout=2):
     try:
         result = subprocess.run(
             ["ping", "-c", "1", "-W", str(timeout), ip],
