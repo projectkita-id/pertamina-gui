@@ -8,3 +8,4 @@ new4.py
 data/
 *.json
 !measure_config.json
+!roi_config.json
