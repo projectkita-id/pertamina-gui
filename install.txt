@@ -1,5 +1,7 @@
-pip install open3d==0.18.0
-pip install customtkinter pillow matplotlib numpy
+pip install open3d==0.19.0
+pip install customtkinter pillow matplotlib numpy==1.24.4
+pip install scipy==1.10.1
+pip install scikit-learn==1.2.2
 pip install rclpy sensor-msgs-py
 pip install PyMySQL mysql-connector-python
 sudo apt install python3-tk libgl1-mesa-glx

@@ -110,7 +110,7 @@ def upload(p, l, t):
     port = int(port) if port else 3306
 
     conn = None
-    retries = 3  # Max retry kalau timeout
+    retries = 3
     while retries > 0:
         try:
             conn = pymysql.connect(
@@ -121,43 +121,50 @@ def upload(p, l, t):
                 database=db_name,
                 charset='utf8mb4',
                 cursorclass=pymysql.cursors.DictCursor,
-                connect_timeout=10  # Timeout connect 10 detik (default infinite, bikin lelet)
+                connect_timeout=10
             )
             cursor = conn.cursor()
 
             cursor.execute("""
-                CREATE TABLE IF NOT EXISTS data (
+                CREATE TABLE IF NOT EXISTS sensor_dimensi (
                     id INT AUTO_INCREMENT PRIMARY KEY,
-                    panjang FLOAT NOT NULL,
-                    lebar FLOAT NOT NULL,
-                    tinggi FLOAT NOT NULL
+                    panjang INT NOT NULL,
+                    lebar INT NOT NULL,
+                    tinggi INT NOT NULL
                 )
             """)
             conn.commit()
 
-            cursor.execute("SELECT id FROM data WHERE id = 1")
+            cursor.execute("SELECT id FROM sensor_dimensi WHERE id = 1")
             if cursor.fetchone() is None:
-                cursor.execute("INSERT INTO data (id, panjang, lebar, tinggi) VALUES (1, 0, 0, 0)")
+                cursor.execute("INSERT INTO sensor_dimensi (id, panjang, lebar, tinggi) VALUES (1, 0, 0, 0)")
                 conn.commit()
 
+            # --- Konversi ke milimeter dan bulatkan ---
+            p_mm = int(round(p * 1000))
+            l_mm = int(round(l * 1000))
+            t_mm = int(round(t * 1000))
+
             cursor.execute("""
-                UPDATE data
+                UPDATE sensor_dimensi
                 SET panjang=%s, lebar=%s, tinggi=%s
                 WHERE id=1
-            """, (round(p, 2), round(l, 2), round(t, 2)))
+            """, (p_mm, l_mm, t_mm))
             conn.commit()
-            print(f"[INFO] Data dikirim ke DB: P={round(p, 2)}, L={round(l, 2)}, T={round(t, 2)}")
+
+            print(f"[INFO] sensor_dimensi dikirim ke DB (mm): P={p_mm}, L={l_mm}, T={t_mm}")
             LAST_SEND = current_time
-            break  # Sukses, keluar loop
+            break
         except pymysql.MySQLError as e:
             retries -= 1
-            print(f"[ERROR] Gagal mengirim data ke database (retry {3-retries}): {str(e)}")
+            print(f"[ERROR] Gagal mengirim sensor_dimensi ke database (retry {3-retries}): {str(e)}")
             if retries == 0:
                 print("[ERROR] Max retry reached, skipping upload")
-            time.sleep(1)  # Delay sedikit sebelum retry
+            time.sleep(1)
         finally:
             if conn:
                 conn.close()
+
 
 class LivoxGUI(Node):
     def __init__(self, app, p_val=None, l_val=None, t_val=None, data_event=None):
