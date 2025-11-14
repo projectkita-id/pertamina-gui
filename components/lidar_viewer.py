@@ -141,9 +141,20 @@ def upload(p, l, t):
                 conn.commit()
 
             # --- Konversi ke milimeter dan bulatkan ---
+            
+            # --- Jika tinggi < 20 cm → kirim 0 ke DB --
+
+	    # --- Jika tinggi < 20 cm → kirim 0 ke DB ---
+            # if t < 0.20:
+            #     p = 0
+            #     l = 0
+            #     t = 0
+
             p_mm = int(round(p * 1000))
             l_mm = int(round(l * 1000))
             t_mm = int(round(t * 1000))
+
+
 
             cursor.execute("""
                 UPDATE sensor_dimensi
@@ -755,6 +766,12 @@ class LivoxGUI(Node):
                 try:
                     print("sending to gui directly via shared mem")
                     if self.p_val is not None and self.data_event is not None:
+                        # --- Jika tinggi < 20 cm → anggap tidak ada objek ---
+                        # if T < 0.20:
+                        #     P = 0
+                        #     L = 0
+                        #     T = 0
+
                         self.p_val.value = P
                         self.l_val.value = L
                         self.t_val.value = T
@@ -1386,6 +1403,12 @@ class LivoxCalib(Node):
                 try:
                     print("sending to gui directly via shared mem")
                     if self.p_val is not None and self.data_event is not None:
+                        # --- Jika tinggi < 20 cm → anggap tidak ada objek ---
+                        # if T < 0.20:
+                        #     P = 0
+                        #     L = 0
+                        #     T = 0
+
                         self.p_val.value = P
                         self.l_val.value = L
                         self.t_val.value = T
