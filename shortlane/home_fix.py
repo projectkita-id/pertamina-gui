@@ -151,8 +151,8 @@ class Home(ctk.CTkFrame) :
         self.heightValue.pack(pady=50)
 
         self.sync_button_text()
-        # self.dimension_consumer_thread = threading.Thread(target=self.dimension_consumer, daemon=True)
-        # self.dimension_consumer_thread.start()
+        self.dimension_consumer_thread = threading.Thread(target=self.dimension_consumer, daemon=True)
+        self.dimension_consumer_thread.start()
     
     def toggle_lidar(self):
         flag_window = "/tmp/lidar_visible"
