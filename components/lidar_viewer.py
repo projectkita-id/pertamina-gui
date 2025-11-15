@@ -18,33 +18,11 @@ import rclpy, threading, numpy as np, json, os, matplotlib.pyplot as plt
 GUI_INSTANCE = None
 LAST_SEND = 0
 
-# ==== Global config paths ====
-BASE_DIR = os.path.abspath(os.getcwd())
+# ==== Global config paths (agar sinkron antar proses) ====
+BASE_DIR = os.path.abspath(os.getcwd())  # Folder tempat main.py dijalankan
 CONFIG_PATH = os.path.join(BASE_DIR, "roi_config.json")
 GROUND_MODEL_PATH = os.path.join(BASE_DIR, "ground_plane.npy")
 MEASURE_CONFIG_PATH = os.path.join(BASE_DIR, "measure_config.json")
-
-
-# ============================================================
-# ===  FIX 1: Tambahkan Queue & Worker untuk upload DB  ======
-# ============================================================
-
-UPLOAD_QUEUE = queue.Queue(maxsize=20)
-
-def upload_worker():
-    """Worker untuk upload data — mencegah thread explosion"""
-    while True:
-        try:
-            p, l, t = UPLOAD_QUEUE.get()
-            upload(p, l, t)
-        except Exception as e:
-            print(f"[ERROR] upload_worker: {e}")
-        finally:
-            UPLOAD_QUEUE.task_done()
-
-threading.Thread(target=upload_worker, daemon=True).start()
-### >>> STABILITAS FIX END
-
 
 def load_measure_config():
     """Muat konfigurasi dari measure_config.json dengan fallback default."""
@@ -264,23 +242,10 @@ class LivoxGUI(Node):
         self.frame_interval = 0.1   # detik per frame (0.1 = 10 Hz)
         self.point_size = 5.0       # ukuran titik point cloud
 
-                # === Geometry names to manage on scene ===
+        # === Geometry names to manage on scene ===
         self._name_cloud = "PointCloud"
         self._name_roi = "ROI"
         self._name_obb = "StableOBB"
-
-        # === Rendering materials (dibuat sekali saja) ===
-        self._mat_cloud = rendering.MaterialRecord()
-        self._mat_cloud.shader = "defaultUnlit"
-        self._mat_cloud.point_size = float(self.point_size)
-
-        self._mat_roi = self.roi_material()
-
-        self._mat_obb = rendering.MaterialRecord()
-        self._mat_obb.shader = "unlitLine"
-        self._mat_obb.line_width = 4.0
-
-        self._current_obb = None
 
         # Flags & params
         self.show_ground_color = True         # hanya mematikan warna, bukan deteksi
@@ -314,12 +279,9 @@ class LivoxGUI(Node):
         self._config_watch_thread = threading.Thread(target=self._watch_config_files, daemon=True)
         self._config_watch_thread.start()
 
-                # ==== ROI geometry ====
+        # ==== ROI geometry ====
         self.roi_box = self.create_roi_box()
-        self.scene.scene.add_geometry(self._name_roi, self.roi_box, self._mat_roi)
-
-        # ==== Cloud geometry ====
-        self.scene.scene.add_geometry(self._name_cloud, self.pcd, self._mat_cloud)
+        self.scene.scene.add_geometry(self._name_roi, self.roi_box, self.roi_material())
 
         self.window.set_on_layout(self.on_layout)
 
@@ -740,13 +702,18 @@ class LivoxGUI(Node):
 
         # ROI mask
         bbox = self.create_roi_box()
+        roi_indices = bbox.get_point_indices_within_bounding_box(o3d.utility.Vector3dVector(pts))
         roi_indices = np.array(roi_indices, dtype=int)
         dim_text = "Belum ada objek terdeteksi"
 
-        # OBB default: di-clear, nanti diisi kalau ada objek
-        self._current_obb = None
+        # Prepare for OBB redraw
+        def remove_old_obb():
+            try:
+                self.scene.scene.remove_geometry(self._name_obb)
+            except Exception:
+                pass
 
-
+        remove_old_obb()
 
         if len(roi_indices) > 50:
             pts_roi = pts[roi_indices]
@@ -789,7 +756,6 @@ class LivoxGUI(Node):
                     pts_for_measure = pts_roi[non_ground_mask]
                     assume_non_ground = True
 
-            
             # Ukur dimensi stabil
             result = self.measure_dims_stable(pts_for_measure, assume_non_ground=assume_non_ground)
             if result is not None:
@@ -810,25 +776,16 @@ class LivoxGUI(Node):
                         self.l_val.value = L
                         self.t_val.value = T
                         self.data_event.set()  # Signal ke GUI bahwa data ready
-
-                    # ============================
-                    #  FIX: GANTI BAGIAN INI
-                    # ============================
-                    try:
-                        if not UPLOAD_QUEUE.full():
-                            UPLOAD_QUEUE.put_nowait((P, L, T))
-                        else:
-                            print("[WARN] UPLOAD_QUEUE penuh, skip upload")
-                    except queue.Full:
-                        print("[WARN] Race condition queue full, skip")
+                    threading.Thread(target=upload, args=(P, L, T), daemon=True).start()
                 except Exception as e:
                     print(f"nope, sending error: {type(e).__name__} - {str(e)}")
                     pass
 
                 if obb is not None:
-                    # Simpan OBB, nanti digambar di update_scene()
-                    self._current_obb = obb
-
+                    mat_box = rendering.MaterialRecord()
+                    mat_box.shader = "unlitLine"
+                    mat_box.line_width = 4.0
+                    self.scene.scene.add_geometry(self._name_obb, obb, mat_box)
 
         # Update label di UI
         gui.Application.instance.post_to_main_thread(
@@ -840,33 +797,22 @@ class LivoxGUI(Node):
         self.pcd.colors = o3d.utility.Vector3dVector(cols)
 
         def update_scene():
-            # Update / re-add point cloud (pakai material yang sama)
-            try:
-                self.scene.scene.remove_geometry(self._name_cloud)
-            except Exception:
-                pass
-            self.scene.scene.add_geometry(self._name_cloud, self.pcd, self._mat_cloud)
+            # Clear hanya geometri dinamis, lalu re-add
+            self.scene.scene.clear_geometry()
+            self.scene.scene.add_geometry(self._name_cloud, self.pcd, rendering.MaterialRecord())
+            self.scene.scene.add_geometry(self._name_roi, self.roi_box, self.roi_material())
+            # OBB jika ada sudah ditambahkan di atas (akan hilang saat clear, jadi re-add bila perlu)
+            # Untuk kesederhanaan, bila obb dibuat pada frame ini sudah ditambahkan; kalau ingin persist,
+            # bisa simpan dan re-add di sini.
 
-            # ROI tidak di-clear tiap frame; sudah dikelola lewat update_roi_box()
-
-            # OBB: hapus yang lama, gambar yang baru kalau ada
-            try:
-                self.scene.scene.remove_geometry(self._name_obb)
-            except Exception:
-                pass
-            if self._current_obb is not None:
-                self.scene.scene.add_geometry(self._name_obb, self._current_obb, self._mat_obb)
-
-            if not self._camera_set and len(self.pcd.points) > 0:
+            if not self._camera_set:
                 bbox = self.pcd.get_axis_aligned_bounding_box()
                 center = bbox.get_center()
                 radius = np.linalg.norm(bbox.get_extent()) * 0.5 + 1.0
                 eye = center + np.array([radius, radius, radius])
                 self.scene.scene.camera.look_at(center.tolist(), eye.tolist(), [0, 0, 1])
                 self._camera_set = True
-
             self.scene.force_redraw()
-
 
         gui.Application.instance.post_to_main_thread(self.window, update_scene)
 
@@ -956,23 +902,10 @@ class LivoxCalib(Node):
         self.frame_interval = 0.1   # detik per frame (0.1 = 10 Hz)
         self.point_size = 5.0       # ukuran titik point cloud
 
-                # === Geometry names to manage on scene ===
+        # === Geometry names to manage on scene ===
         self._name_cloud = "PointCloud"
         self._name_roi = "ROI"
         self._name_obb = "StableOBB"
-
-        # === Rendering materials (dibuat sekali saja) ===
-        self._mat_cloud = rendering.MaterialRecord()
-        self._mat_cloud.shader = "defaultUnlit"
-        self._mat_cloud.point_size = float(self.point_size)
-
-        self._mat_roi = self.roi_material()
-
-        self._mat_obb = rendering.MaterialRecord()
-        self._mat_obb.shader = "unlitLine"
-        self._mat_obb.line_width = 4.0
-
-        self._current_obb = None
 
         # Flags & params
         self.show_ground_color = True         # hanya mematikan warna, bukan deteksi
@@ -1002,12 +935,9 @@ class LivoxCalib(Node):
         # ==== Load ROI config ====
         self.load_roi_from_file()
 
-                # ==== ROI geometry ====
+        # ==== ROI geometry ====
         self.roi_box = self.create_roi_box()
-        self.scene.scene.add_geometry(self._name_roi, self.roi_box, self._mat_roi)
-
-        # ==== Cloud geometry ====
-        self.scene.scene.add_geometry(self._name_cloud, self.pcd, self._mat_cloud)
+        self.scene.scene.add_geometry(self._name_roi, self.roi_box, self.roi_material())
 
         # ==== Panel GUI ====
         em = self.window.theme.font_size
@@ -1483,24 +1413,16 @@ class LivoxCalib(Node):
                         self.l_val.value = L
                         self.t_val.value = T
                         self.data_event.set()  # Signal ke GUI bahwa data ready
-
-                    # ============================
-                    #  FIX: GANTI BAGIAN INI
-                    # ============================
-                    try:
-                        if not UPLOAD_QUEUE.full():
-                            UPLOAD_QUEUE.put_nowait((P, L, T))
-                        else:
-                            print("[WARN] UPLOAD_QUEUE penuh, skip upload")
-                    except queue.Full:
-                        print("[WARN] Race condition queue full, skip")
+                    threading.Thread(target=upload, args=(P, L, T), daemon=True).start()
                 except Exception as e:
                     print(f"nope, sending error: {type(e).__name__} - {str(e)}")
                     pass
 
                 if obb is not None:
-                    self._current_obb = obb
-
+                    mat_box = rendering.MaterialRecord()
+                    mat_box.shader = "unlitLine"
+                    mat_box.line_width = 4.0
+                    self.scene.scene.add_geometry(self._name_obb, obb, mat_box)
 
         # Update label di UI
         gui.Application.instance.post_to_main_thread(
@@ -1512,31 +1434,22 @@ class LivoxCalib(Node):
         self.pcd.colors = o3d.utility.Vector3dVector(cols)
 
         def update_scene():
-            try:
-                self.scene.scene.remove_geometry(self._name_cloud)
-            except Exception:
-                pass
-            self.scene.scene.add_geometry(self._name_cloud, self.pcd, self._mat_cloud)
+            # Clear hanya geometri dinamis, lalu re-add
+            self.scene.scene.clear_geometry()
+            self.scene.scene.add_geometry(self._name_cloud, self.pcd, rendering.MaterialRecord())
+            self.scene.scene.add_geometry(self._name_roi, self.roi_box, self.roi_material())
+            # OBB jika ada sudah ditambahkan di atas (akan hilang saat clear, jadi re-add bila perlu)
+            # Untuk kesederhanaan, bila obb dibuat pada frame ini sudah ditambahkan; kalau ingin persist,
+            # bisa simpan dan re-add di sini.
 
-            try:
-                self.scene.scene.remove_geometry(self._name_obb)
-            except Exception:
-                pass
-            if self._current_obb is not None:
-                self.scene.scene.add_geometry(self._name_obb, self._current_obb, self._mat_obb)
-
-            # ROI dikelola oleh update_roi_box()
-
-            if not self._camera_set and len(self.pcd.points) > 0:
+            if not self._camera_set:
                 bbox = self.pcd.get_axis_aligned_bounding_box()
                 center = bbox.get_center()
                 radius = np.linalg.norm(bbox.get_extent()) * 0.5 + 1.0
                 eye = center + np.array([radius, radius, radius])
                 self.scene.scene.camera.look_at(center.tolist(), eye.tolist(), [0, 0, 1])
                 self._camera_set = True
-
             self.scene.force_redraw()
-
 
         gui.Application.instance.post_to_main_thread(self.window, update_scene)
 
