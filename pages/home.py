@@ -160,7 +160,7 @@ class Home(ctk.CTkFrame):
             container,
             text="Open 3D Lidar Viewer",
             font=fontSmall,
-            fg_color="#F01382",
+            fg_color="#2913F0",
             command=self.toggle_lidar,
             height=40
         )
@@ -185,8 +185,8 @@ class Home(ctk.CTkFrame):
             corner_radius=20,
         )
         box.pack(fill="x", pady=10)
-        ctk.CTkLabel(box, text=title, font=font, text_color="#F01382").pack(pady=(40, 0))
-        val = ctk.CTkLabel(box, text="0", font=fontBig, text_color="#F01382")
+        ctk.CTkLabel(box, text=title, font=font, text_color="#2913F0").pack(pady=(40, 0))
+        val = ctk.CTkLabel(box, text="0", font=fontBig, text_color="#2913F0")
         val.pack(pady=40)
         return val
 
@@ -225,7 +225,11 @@ class Home(ctk.CTkFrame):
         now = time.time()
         if now - self.last_update < 0.1:
             return
-        self.lengthValue.configure(text=f"{p:.2f}")
-        self.widthValue.configure(text=f"{l:.2f}")
-        self.heightValue.configure(text=f"{t:.2f}")
+        p_mm = int(round(p * 1000))
+        l_mm = int(round(l * 1000))
+        t_mm = int(round(t * 1000))
+
+        self.lengthValue.configure(text=f"{p_mm}")
+        self.widthValue.configure(text=f"{l_mm}")
+        self.heightValue.configure(text=f"{t_mm}")
         self.last_update = now

@@ -10,7 +10,7 @@ if __name__ == "__main__":
     ctk.set_default_color_theme("dark-blue")
 
     root = ctk.CTk()
-    root.title("Lidar Data Viewer")
+    root.title("Scanner Dimensi Kendaraan Bermotor")
     root.geometry("500x900")
     root.resizable(False, False)
 

@@ -28,7 +28,7 @@ class MessageBox(ctk.CTkToplevel):
             text_color = "#41b831"
 
         ctk.CTkLabel(self, text=message, wraplength=250, font=font, text_color=text_color).pack(pady=30)
-        ctk.CTkButton(self, text="OK", width=100, font=font, fg_color="#F01382", hover=False, cursor="hand2", command=lambda: self.ok_callback() if hasattr(self, "ok_callback") else self.destroy()).pack(pady=2)
+        ctk.CTkButton(self, text="OK", width=100, font=font, fg_color="#2913F0", hover=False, cursor="hand2", command=lambda: self.ok_callback() if hasattr(self, "ok_callback") else self.destroy()).pack(pady=2)
 
         self.grab_set()
         self.focus_force()

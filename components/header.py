@@ -9,14 +9,14 @@ class Header(ctk.CTkFrame):
         self.pack(fill="x")
 
         # Font Template
-        font = ctk.CTkFont(family="Verdana", size=24, weight="bold")
+        font = ctk.CTkFont(family="Verdana", size=18, weight="bold")
 
         # Header Frame
         head = ctk.CTkFrame(self, fg_color="white")
         head.pack(fill="x", padx=20)
 
         # Header Content
-        header = ctk.CTkLabel(head, text="Truck Dimension Detector", font=font, fg_color="white", text_color="#F01382")
+        header = ctk.CTkLabel(head, text="UPPKB PADANG ULAK TANDING", font=font, fg_color="white", text_color="#2B16E4")
         header.pack(side="left", pady=(20, 0))
         
         setting = Image.open('assets/icon/settings.png')
