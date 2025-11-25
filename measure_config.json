@@ -1,6 +1,6 @@
 {
   "general": {
-    "frame_interval": 0.1,
+    "frame_interval": 0.2,
     "point_size": 5.0,
     "lidar_tilt_deg": 30.0,
     "lidar_invert_z": true
@@ -33,8 +33,8 @@
     "max_history": 500,
     "deviation_guard": 0.15,
     "ema_factor_length_new": 0.2,
-    "ema_factor_length_old": 0.82,
+    "ema_factor_length_old": 0.8,
     "ema_factor_width_new": 0.2,
-    "ema_factor_width_old": 0.82
+    "ema_factor_width_old": 0.8
   }
 }

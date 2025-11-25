@@ -1,42 +1,53 @@
 #!/bin/bash
+
 # ===============================================
-#  Lidar Data Viewer Launcher (Ubuntu 22.04)
-#  Jalankan GUI Lidar secara otomatis
-#  Folder proyek: /home/username/dimension
+#  Lidar Data Viewer Launcher (AUTO-RESTART GUI)
 # ===============================================
 
-# ---- Cek Python dan ROS2 ----
-if ! command -v python3 &> /dev/null; then
-    echo "[❌] Python3 tidak ditemukan! Silakan install dulu: sudo apt install python3"
-    exit 1
-fi
+BASE_DIR="/home/yants/pertamina-gui"
 
-if [ ! -d "/opt/ros/humble" ]; then
-    echo "[❌] ROS2 Humble tidak ditemukan! Pastikan sudah terinstal di /opt/ros/humble"
-    exit 1
-fi
-
-# ---- Source environment ROS2 & Livox ----
-echo "[🔧] Mengaktifkan ROS2 environment..."
+echo "[🔧] Aktifkan ROS2..."
 source /opt/ros/humble/setup.bash
 
-if [ -d "$HOME/livox_ws/install" ]; then
-    echo "[🔧] Mengaktifkan Livox workspace..."
-    source ~/livox_ws/install/setup.bash
-else
-    echo "[⚠️] Livox workspace tidak ditemukan di ~/livox_ws"
-fi
+echo "[🔧] Aktifkan Livox workspace..."
+source ~/livox_ws/install/setup.bash
 
-# ---- Masuk ke direktori proyek ----
-cd /home/uppkb/dimension || {
-    echo "[❌] Folder proyek tidak ditemukan di /home/username/dimension"
-    exit 1
+echo "[🚀] Menjalankan Livox MID360 ROS2 driver..."
+ros2 launch livox_ros_driver2 lidar_only_MID360.launch.py &
+ROS2_PID=$!
+
+sleep 0.5
+echo "[🟢] ROS2 berjalan (PID=$ROS2_PID)"
+
+cd "$BASE_DIR" || exit 1
+
+cleanup() {
+    echo "[🧹] Cleanup: matikan ROS2..."
+    if kill -0 "$ROS2_PID" 2>/dev/null; then
+        kill "$ROS2_PID" 2>/dev/null
+        sleep 2
+        kill -9 "$ROS2_PID" 2>/dev/null
+    fi
 }
+trap cleanup EXIT
 
-# ---- Jalankan aplikasi utama ----
-echo "[🚀] Menjalankan Lidar Data Viewer..."
-python3 main.py
+while true; do
+    echo "[🚀] Menjalankan GUI..."
+    python3 main.py
+    EXIT_CODE=$?
 
-# ---- Jika program selesai ----
-echo ""
-echo "[✅] Program selesai dijalankan."
+    echo "[ℹ️] GUI exit (code=$EXIT_CODE)"
+
+    # ===========================================================
+    #  JIKa GUI DITUTUP MANUAL (EXIT CODE = 0) → STOP LAUNCHER
+    # ===========================================================
+    if [ $EXIT_CODE -eq 0 ]; then
+        echo "[🛑] GUI ditutup manual → launcher berhenti TOTAL."
+        exit 0
+    fi
+
+    # Jika exit karena auto-close, restart GUI
+    echo "[⏱] Tunggu 1 detik sebelum start GUI lagi..."
+    sleep 0.5
+done
+

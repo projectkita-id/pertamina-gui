@@ -1,51 +1,53 @@
-from PIL import ImageTk
-from components.db_config  import init
-
+#!/usr/bin/env python3
 import customtkinter as ctk
+from PIL import ImageTk
+from components.db_config import init
 import pages.home as home
-import subprocess
-import time
-
-# Jalankan ROS2 driver
-subprocess.Popen([
-    "bash", "-c",
-    "source /opt/ros/humble/setup.bash && \
-     source ~/livox_ws/install/setup.bash && \
-     ros2 launch livox_ros_driver2 rviz_MID360_launch.py"
-])
-
-time.sleep(3)
-# lalu lanjut ke GUI utama
+import sys   # <--- Tambahkan ini
 
 if __name__ == "__main__":
-    # Style
-    style = ctk.set_appearance_mode("light")
+    ctk.set_appearance_mode("light")
     ctk.set_default_color_theme("dark-blue")
-    ctk.set_widget_scaling(1.0)
 
-    # Main Window
     root = ctk.CTk()
     root.title("Lidar Data Viewer")
-    # root.minsize(800, 600)
+    root.geometry("500x900")
     root.resizable(False, False)
-    root.geometry("500x900")   
 
-    # App Icons
-    appIcon = ImageTk.PhotoImage(file="assets/icon/logo.ico")
-    root.tk.call('wm', 'iconphoto', root._w, appIcon)
+    try:
+        appIcon = ImageTk.PhotoImage(file="assets/icon/logo.ico")
+        root.tk.call('wm', 'iconphoto', root._w, appIcon)
+    except:
+        print("[WARN] Logo icon tidak ditemukan")
 
     init()
-    current_page = None
 
-    def show_page(page) :
-        global current_page
-        if current_page is not None :
-            current_page.pack_forget()
-            current_page.destroy()
-        new = page(root, show_page)
-        new.pack(fill="both", expand=True)
-        globals()["current_page"] = new
+    current_page = [None]
+
+    def show_page(page):
+        if current_page[0] is not None:
+            current_page[0].pack_forget()
+            current_page[0].destroy()
+
+        new_page = page(root, show_page)
+        new_page.pack(fill="both", expand=True)
+        current_page[0] = new_page
 
     show_page(home.Home)
 
-root.mainloop()
+    # ---------------- AUTO-CLOSE TIMER ----------------
+    AUTO_EXIT_SECONDS = 30 * 60  
+
+    def auto_close():
+        print(f"[GUI] Auto-close setelah {AUTO_EXIT_SECONDS} detik, tutup GUI + viewer...")
+        cb = getattr(root, "_on_close_callback", None)
+        if cb is not None:
+            cb()  # kill_viewer() + destroy()
+        else:
+            root.destroy()
+
+        sys.exit(5)  # <--- Auto-close exit code (untuk restart)
+    # --------------------------------------------------
+
+    root.after(AUTO_EXIT_SECONDS * 1000, auto_close)
+    root.mainloop()

@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 from rclpy.node import Node
-from datetime import datetime
-from multiprocessing import Queue
 from sensor_msgs.msg import PointCloud2
 from components.db_config import get_conf
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
@@ -13,16 +11,45 @@ import open3d as o3d
 import sensor_msgs_py.point_cloud2 as pc2
 import open3d.visualization.gui as gui
 import open3d.visualization.rendering as rendering
-import rclpy, threading, numpy as np, json, os, matplotlib.pyplot as plt
+import rclpy
+import threading
+import numpy as np
+import json
+import os
+import matplotlib.pyplot as plt
+
+# ===================== GLOBAL STATE =====================
 
 GUI_INSTANCE = None
 LAST_SEND = 0
+
+DEBUG_MODE = True     # Aktifkan debug mode
+ROS_FRAME_TIME = 0.0
+RENDER_TIME = 0.0
+
+
+# Queue untuk upload database agar tidak spawn thread terus
+MEASURE_QUEUE = queue.Queue(maxsize=1)
+DB_WORKER_STARTED = False
+
+# Backoff & limit untuk koneksi DB agar tidak bikin freeze
+DB_BACKOFF_UNTIL = 0          # timestamp sampai kapan kita skip semua upload
+DB_BACKOFF_SECONDS = 30       # kalau gagal konek → skip 30 detik
+DB_MAX_RETRIES = 1            # cukup 1x percobaan tiap upload cycle
+DB_CONNECT_TIMEOUT = 1        # detik, jangan lebih besar dari 1–2
+
+# Path flag untuk mode calibrate/home dan visibilitas window
+VISIBLE_FLAG_PATH = "/tmp/lidar_visible"       # ada = window harus terlihat
+CALIB_MODE_FLAG_PATH = "/tmp/lidar_calib_mode" # ada = mode CALIB (dengan panel)
 
 # ==== Global config paths (agar sinkron antar proses) ====
 BASE_DIR = os.path.abspath(os.getcwd())  # Folder tempat main.py dijalankan
 CONFIG_PATH = os.path.join(BASE_DIR, "roi_config.json")
 GROUND_MODEL_PATH = os.path.join(BASE_DIR, "ground_plane.npy")
 MEASURE_CONFIG_PATH = os.path.join(BASE_DIR, "measure_config.json")
+
+
+# ===================== CONFIG HANDLING =====================
 
 def load_measure_config():
     """Muat konfigurasi dari measure_config.json dengan fallback default."""
@@ -84,6 +111,7 @@ def watch_measure_config(node):
     """Pantau perubahan file konfigurasi dan reload otomatis."""
     def mtime():
         return os.path.getmtime(MEASURE_CONFIG_PATH) if os.path.exists(MEASURE_CONFIG_PATH) else 0
+
     last = mtime()
     while True:
         time.sleep(2)
@@ -94,25 +122,37 @@ def watch_measure_config(node):
             node.measure_cfg = load_measure_config()
 
 
+# ===================== DB UPLOAD =====================
+
 def upload(p, l, t):
-    global LAST_SEND
-    current_time = time.time()
-    if current_time - LAST_SEND < 5:
-        print("[INFO] Melewati upload data untuk menghindari pengiriman berlebih.")
+    """Upload dimensi ke database (mm) dengan throttle, backoff, dan timeout kecil."""
+    global LAST_SEND, DB_BACKOFF_UNTIL
+
+    now = time.time()
+
+    # Kalau sedang masa backoff karena error sebelumnya → langsung skip
+    if now < DB_BACKOFF_UNTIL:
+        print("[WARN] DB dalam masa backoff, skip upload.")
+        return
+
+    # Batasin frekuensi kirim ke DB (misal setiap ≥5 detik)
+    if now - LAST_SEND < 5:
         return
 
     config = get_conf(["address", "username", "password", "port", "db_name"])
     if not all(config):
-        print("[ERROR] Database configuration is incomplete.")
+        print("[ERROR] Database configuration is incomplete. Skip upload.")
         return
-    
+
     address, username, password, port, db_name = config
     port = int(port) if port else 3306
 
     conn = None
-    retries = 3
+    retries = DB_MAX_RETRIES
+
     while retries > 0:
         try:
+            print(f"[INFO] Coba konek DB {address}:{port} (retry sisa: {retries})")
             conn = pymysql.connect(
                 host=address,
                 user=username,
@@ -121,7 +161,7 @@ def upload(p, l, t):
                 database=db_name,
                 charset='utf8mb4',
                 cursorclass=pymysql.cursors.DictCursor,
-                connect_timeout=10
+                connect_timeout=DB_CONNECT_TIMEOUT,
             )
             cursor = conn.cursor()
 
@@ -137,24 +177,15 @@ def upload(p, l, t):
 
             cursor.execute("SELECT id FROM sensor_dimensi WHERE id = 1")
             if cursor.fetchone() is None:
-                cursor.execute("INSERT INTO sensor_dimensi (id, panjang, lebar, tinggi) VALUES (1, 0, 0, 0)")
+                cursor.execute(
+                    "INSERT INTO sensor_dimensi (id, panjang, lebar, tinggi) VALUES (1, 0, 0, 0)"
+                )
                 conn.commit()
 
-            # --- Konversi ke milimeter dan bulatkan ---
-            
-            # --- Jika tinggi < 20 cm → kirim 0 ke DB --
-
-	    # --- Jika tinggi < 20 cm → kirim 0 ke DB ---
-            # if t < 0.20:
-            #     p = 0
-            #     l = 0
-            #     t = 0
-
+            # Konversi ke milimeter dan bulatkan
             p_mm = int(round(p * 1000))
             l_mm = int(round(l * 1000))
             t_mm = int(round(t * 1000))
-
-
 
             cursor.execute("""
                 UPDATE sensor_dimensi
@@ -164,72 +195,119 @@ def upload(p, l, t):
             conn.commit()
 
             print(f"[INFO] sensor_dimensi dikirim ke DB (mm): P={p_mm}, L={l_mm}, T={t_mm}")
-            LAST_SEND = current_time
-            break
+            LAST_SEND = now
+            return
+
         except pymysql.MySQLError as e:
             retries -= 1
-            print(f"[ERROR] Gagal mengirim sensor_dimensi ke database (retry {3-retries}): {str(e)}")
-            if retries == 0:
-                print("[ERROR] Max retry reached, skipping upload")
-            time.sleep(1)
+            print(f"[ERROR] Gagal mengirim sensor_dimensi ke database: {str(e)}")
+
+            if retries <= 0:
+                DB_BACKOFF_UNTIL = time.time() + DB_BACKOFF_SECONDS
+                print(f"[ERROR] DB unreachable, aktifkan backoff {DB_BACKOFF_SECONDS} detik.")
+                break
+
+            time.sleep(0.2)
+
         finally:
             if conn:
                 conn.close()
+                conn = None
 
 
-class LivoxGUI(Node):
+def db_worker():
+    """Worker tunggal untuk upload ke database."""
+    while True:
+        try:
+            p, l, t = MEASURE_QUEUE.get()
+            upload(p, l, t)
+        except Exception as e:
+            print(f"[ERROR] db_worker error: {type(e).__name__} - {e}")
+
+
+# ===================== VIEWER CLASS (1 viewer, 2 mode) =====================
+
+class LivoxCalib(Node):
+    """
+    Satu-satunya viewer:
+    - HOME mode  : tanpa side panel (hanya scene 3D + label)
+    - CALIB mode : dengan side panel ROI / Ground / dsb.
+    Mode dikontrol oleh file flag /tmp/lidar_calib_mode
+    Visibilitas jendela dikontrol oleh /tmp/lidar_visible
+    """
+
     def __init__(self, app, p_val=None, l_val=None, t_val=None, data_event=None):
-        global GUI_INSTANCE
-        super().__init__("livox_open3d_gui")
+        global GUI_INSTANCE, DB_WORKER_STARTED
+        super().__init__("livox_open3d_viewer")
+
+        # Start DB worker sekali saja di process ini
+        if not DB_WORKER_STARTED:
+            threading.Thread(target=db_worker, daemon=True).start()
+            DB_WORKER_STARTED = True
+
         # ==== Load konfigurasi JSON ====
         self.measure_cfg = load_measure_config()
 
+        self._cmap = plt.get_cmap("turbo")  # <-- buat sekali saja
+
         # Terapkan parameter umum
         g = self.measure_cfg["general"]
-        self.frame_interval = g["frame_interval"]
-        self.point_size = g["point_size"]
-        self.set_lidar_orientation(g["lidar_tilt_deg"], g["lidar_invert_z"])
+        self.frame_interval = float(g.get("frame_interval", 0.1))
+        self.point_size = float(g.get("point_size", 5.0))
+        self.set_lidar_orientation(
+            g.get("lidar_tilt_deg", 30.0),
+            g.get("lidar_invert_z", True),
+        )
 
         gr = self.measure_cfg["ground"]
-        self.ground_thresh = gr["ground_thresh"]
-        self.calib_thresh = gr["calib_thresh"]
+        self.ground_thresh = float(gr.get("ground_thresh", 0.03))
+        self.calib_thresh = float(gr.get("calib_thresh", 0.02))
 
         # Jalankan watcher agar reload otomatis bila file JSON berubah
         threading.Thread(target=watch_measure_config, args=(self,), daemon=True).start()
 
+        # QoS untuk Livox PointCloud2
         qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             history=HistoryPolicy.KEEP_LAST,
-            depth=1
+            depth=1,
         )
         self.sub = self.create_subscription(PointCloud2, "/livox/lidar", self.cb, qos)
 
+        # Shared memory ke Tkinter
         self.p_val = p_val
         self.l_val = l_val
         self.t_val = t_val
         self.data_event = data_event
 
+        # ==== Open3D GUI & Window ====
         self.app = app
-        self.window = app.create_window("Livox MID360 - Open3D GUI", 1280, 600)
-        
-        flag_path = "/tmp/lidar_visible"
-        if os.path.exists(flag_path):
-            os.remove(flag_path)
+        self.window = app.create_window("Livox MID360 - Open3D Viewer", 1600, 900)
+
+        if DEBUG_MODE:
+            threading.Thread(target=self.debug_watchdog, daemon=True).start()
+
+        # Mulai dalam keadaan HIDDEN, nanti di-show via flag /tmp/lidar_visible
         self.window.show(False)
 
+        # on_close: jangan matikan process, hanya sembunyikan + hapus flag visible
         def on_close():
             self.hide_window()
-            flag_path = "/tmp/lidar_visible"
-            if os.path.exists(flag_path):
-                os.remove(flag_path)
+            if os.path.exists(VISIBLE_FLAG_PATH):
+                os.remove(VISIBLE_FLAG_PATH)
             return False
-        
+
         GUI_INSTANCE = self
         self.window.set_on_close(on_close)
 
+        # Mode: HOME (False) / CALIB (True)
+        self._is_calib_mode = False
+
+        # Scene & panel
         self.scene = gui.SceneWidget()
         self.scene.scene = rendering.Open3DScene(self.window.renderer)
         self.window.add_child(self.scene)
+
         self.dim_label = gui.Label("Belum ada objek terdeteksi")
 
         self.scene.scene.set_background([0, 0, 0, 1])
@@ -237,10 +315,9 @@ class LivoxGUI(Node):
 
         self.pcd = o3d.geometry.PointCloud()
         self._camera_set = False
-         # ==== Frame & point size control ====
+
+        # Frame timing
         self.last_update_time = self.get_clock().now()
-        self.frame_interval = 0.1   # detik per frame (0.1 = 10 Hz)
-        self.point_size = 5.0       # ukuran titik point cloud
 
         # === Geometry names to manage on scene ===
         self._name_cloud = "PointCloud"
@@ -248,11 +325,9 @@ class LivoxGUI(Node):
         self._name_obb = "StableOBB"
 
         # Flags & params
-        self.show_ground_color = True         # hanya mematikan warna, bukan deteksi
+        self.show_ground_color = True
         self.ground_model = None
         self.is_calibrating = False
-        self.ground_thresh = 0.03             # <— lebih ketat dari 0.08, bisa disesuaikan
-        self.calib_thresh = 0.02              # RANSAC distance saat kalibrasi
 
         # Smoothing state
         self._dim_hist_height = []
@@ -260,677 +335,23 @@ class LivoxGUI(Node):
         self._dim_hist_xy = []
         self._last_xy = None
 
+        # Simpan OBB terakhir (untuk di-update di main thread)
+        self._latest_obb = None
+
         # ==== ROI default ====
         self.roi_center = np.array([0.0, 0.0, 0.0])
-        self.roi_size   = np.array([2.0, 2.0, 1.0])
-        self.roi_rpy    = np.array([0.0, 0.0, 0.0])
+        self.roi_size = np.array([2.0, 2.0, 1.0])
+        self.roi_rpy = np.array([0.0, 0.0, 0.0])
 
         # ==== TOAST ====
         self.toast_label = gui.Label("")
         self._toast_counter = 0
 
         # ==== Orientasi LiDAR ====
-        self.set_lidar_orientation(tilt_deg=30.0, invert_z=True)
-
-        # ==== Load ROI config ====
-        self.load_roi_from_file()
-
-         # ==== ROI & Ground auto-reload watcher ====
-        self._config_watch_thread = threading.Thread(target=self._watch_config_files, daemon=True)
-        self._config_watch_thread.start()
-
-        # ==== ROI geometry ====
-        self.roi_box = self.create_roi_box()
-        self.scene.scene.add_geometry(self._name_roi, self.roi_box, self.roi_material())
-
-        self.window.set_on_layout(self.on_layout)
-
-        # ==== Load ground model kalau ada ====
-        if os.path.exists(GROUND_MODEL_PATH):
-            self.load_ground_model()
-
-        self.monitoring = threading.Thread(target=self.monitor_window_flag, daemon=True)
-        self.monitoring.start()
-
-        self.get_logger().info("✅ GUI aktif + ROI + Ground Calibration + Stable Dimension Measure")
-
-    def monitor_window_flag(self):
-        flag_path = "/tmp/lidar_visible"
-
-        while True:
-            should_be_visible = os.path.exists(flag_path)
-            current_visible = self.window.is_visible
-
-            if should_be_visible and not current_visible:
-                def do_show():
-                    self.show_window()
-                    self.get_logger().info("Window SHOW command sent")
-                    gui.Application.instance.post_to_main_thread(
-                        self.window,
-                        lambda: self.get_logger().info(f"Window NOW visible: {self.window.is_visible}")
-                    )
-
-                gui.Application.instance.post_to_main_thread(self.window, do_show)
-
-            elif not should_be_visible and current_visible:
-                def do_hide():
-                    self.hide_window()
-                    self.get_logger().info("Window HIDE command sent")
-
-                gui.Application.instance.post_to_main_thread(self.window, do_hide)
-
-            threading.Event().wait(0.3)
-
-    # ---------------------- UI util ----------------------
-    def show_toast(self, text, duration=0.8):
-        self._toast_counter += 1
-        my_id = self._toast_counter
-
-        def _show():
-            self.toast_label.text = text
-
-        def _clear_if_same():
-            if my_id == self._toast_counter:
-                self.toast_label.text = ""
-
-        gui.Application.instance.post_to_main_thread(self.window, _show)
-        t = threading.Timer(duration, lambda: gui.Application.instance.post_to_main_thread(self.window, _clear_if_same))
-        t.daemon = True
-        t.start()
-
-    def make_plus_minus_row(self, label_text, target_attr, idx, step):
-        h = gui.Horiz()
-        label = gui.Label(label_text)
-        value = gui.Label(f"{getattr(self, target_attr)[idx]:.3f}")
-        minus_btn = gui.Button("_")
-        plus_btn = gui.Button("+")
-        minus_btn.horizontal_padding_em = 0.4
-        plus_btn.horizontal_padding_em = 0.4
-
-        def adjust(val):
-            arr = getattr(self, target_attr).copy()
-            arr[idx] += val
-            setattr(self, target_attr, arr)
-            value.text = f"{arr[idx]:.3f}"
-            self.update_roi_box()
-            self.get_logger().info(f"{label_text}: {arr[idx]:.3f}")
-            self.show_toast(f"{label_text} diubah: {arr[idx]:.3f}")
-
-        minus_btn.set_on_clicked(lambda: adjust(-step))
-        plus_btn.set_on_clicked(lambda: adjust(step))
-        h.add_child(label)
-
-        h.add_stretch()
-        h.add_child(value)
-        
-        h.add_stretch()
-        h.add_child(minus_btn)
-        h.add_child(plus_btn)
-        return h
-
-    # ----------------- Lidar orientation -----------------
-    def set_lidar_orientation(self, tilt_deg=30.0, invert_z=True):
-        self.lidar_tilt_deg = tilt_deg
-        self.lidar_invert_z = invert_z
-
-    def get_lidar_rotation_matrix(self):
-        tilt_rad = np.deg2rad(self.lidar_tilt_deg)
-        Rx = np.array([
-            [1, 0, 0],
-            [0, np.cos(tilt_rad), -np.sin(tilt_rad)],
-            [0, np.sin(tilt_rad),  np.cos(tilt_rad)],
-        ])
-        Rflip = np.eye(3)
-        if self.lidar_invert_z:
-            Rflip = np.array([[1, 0, 0], [0, -1, 0], [0, 0, -1]])
-        return Rx @ Rflip
-
-    def toggle_ground_color(self):
-        self.show_ground_color = not self.show_ground_color
-        state = "ON" if self.show_ground_color else "OFF"
-        self.get_logger().info(f"🌍 Ground color display {state}")
-        self.show_toast(f"Ground color {state}")
-
-    # ----------------- ROI helpers -----------------
-    def roi_material(self):
-        mat = rendering.MaterialRecord()
-        mat.shader = "unlitLine"
-        mat.base_color = [1.0, 0.0, 0.0, 1.0]
-        return mat
-
-    def euler_to_rotation_matrix(self, roll, pitch, yaw):
-        r, p, y = np.deg2rad([roll, pitch, yaw])
-        Rx = np.array([[1, 0, 0], [0, np.cos(r), -np.sin(r)], [0, np.sin(r), np.cos(r)]])
-        Ry = np.array([[ np.cos(p), 0, np.sin(p)], [0, 1, 0], [-np.sin(p), 0, np.cos(p)]])
-        Rz = np.array([[ np.cos(y), -np.sin(y), 0], [np.sin(y), np.cos(y), 0], [0, 0, 1]])
-        return Rz @ Ry @ Rx
-
-    def create_roi_box(self):
-        R = self.euler_to_rotation_matrix(*self.roi_rpy)
-        bbox = o3d.geometry.OrientedBoundingBox(self.roi_center, R, self.roi_size)
-        bbox.color = (1, 0, 0)
-        return bbox
-
-    def update_roi_box(self):
-        try:
-            self.scene.scene.remove_geometry(self._name_roi)
-        except Exception:
-            pass
-        self.roi_box = self.create_roi_box()
-        self.scene.scene.add_geometry(self._name_roi, self.roi_box, self.roi_material())
-        self.scene.force_redraw()
-
-    # ----------------- Ground Calibration -----------------
-    def calibrate_ground(self):
-        self.is_calibrating = True
-        self.get_logger().info("📏 Calibrating ground plane... (tunggu beberapa frame)")
-        self.show_toast("Calibrating ground...")
-
-    def save_ground_model(self, model):
-        np.save(GROUND_MODEL_PATH, model)
-        self.get_logger().info(f"💾 Ground model saved to {GROUND_MODEL_PATH}")
-        self.show_toast("Ground model disimpan")
-
-    def load_ground_model(self):
-        if os.path.exists(GROUND_MODEL_PATH):
-            self.ground_model = np.load(GROUND_MODEL_PATH)
-            self.get_logger().info(f"📂 Ground model loaded from {GROUND_MODEL_PATH}")
-            self.show_toast("Ground model dimuat")
-        else:
-            self.get_logger().warn("❌ Belum ada model ground, lakukan kalibrasi dahulu!")
-            self.show_toast("Belum ada ground model")
-
-    def _watch_config_files(self):
-        """Pantau perubahan file ROI & ground plane, reload otomatis jika berubah"""
-        def safe_mtime(path):
-            try:
-                return os.path.getmtime(path) if os.path.exists(path) else 0
-            except Exception:
-                return 0
-
-        roi_mtime = safe_mtime(CONFIG_PATH)
-        ground_mtime = safe_mtime(GROUND_MODEL_PATH)
-
-        while True:
-            time.sleep(2)
-            new_roi_mtime = safe_mtime(CONFIG_PATH)
-            new_ground_mtime = safe_mtime(GROUND_MODEL_PATH)
-
-            # Jika ROI berubah
-            if new_roi_mtime != roi_mtime:
-                roi_mtime = new_roi_mtime
-                print("[INFO] ROI config file changed, reloading in Home viewer...")
-                gui.Application.instance.post_to_main_thread(
-                    self.window,
-                    lambda: (self.load_roi_from_file(), self.update_roi_box())
-                )
-
-            # Jika ground model berubah
-            if new_ground_mtime != ground_mtime:
-                ground_mtime = new_ground_mtime
-                print("[INFO] Ground model file changed, reloading in Home viewer...")
-                gui.Application.instance.post_to_main_thread(
-                    self.window,
-                    lambda: self.load_ground_model()
-                )
-
-
-    # ----------------- ROI persistence -----------------
-    def save_roi_to_file(self):
-        data = {"center": self.roi_center.tolist(), "size": self.roi_size.tolist(), "rpy": self.roi_rpy.tolist()}
-        with open(CONFIG_PATH, "w") as f:
-            json.dump(data, f, indent=2)
-        self.get_logger().info(f"💾 ROI saved to {CONFIG_PATH}")
-        self.show_toast("ROI disimpan")
-
-    def load_roi_from_file(self):
-        # os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-        if os.path.exists(CONFIG_PATH):
-            with open(CONFIG_PATH, "r") as f:
-                data = json.load(f)
-            self.roi_center = np.array(data.get("center", [0, 0, 0]), dtype=float)
-            self.roi_size   = np.array(data.get("size",   [2, 2, 1]), dtype=float)
-            self.roi_rpy    = np.array(data.get("rpy",    [0, 0, 0]), dtype=float)
-            print(f"[INFO] ROI loaded from {CONFIG_PATH}")
-        else:
-            print("[INFO] No saved ROI config found, using defaults")
-
-    def reset_roi(self):
-        self.roi_center = np.array([0.0, 0.0, 0.0])
-        self.roi_size   = np.array([2.0, 2.0, 1.0])
-        self.roi_rpy    = np.array([0.0, 0.0, 0.0])
-        self.update_roi_box()
-        self.get_logger().info("🔄 ROI reset ke default")
-        self.show_toast("ROI di-reset")
-
-    # ----------------- Stable dimension measure -----------------
-   
-    def measure_dims_stable(self, pts_in, assume_non_ground=False):
-        """
-        Hybrid dimension measurement dengan konfigurasi eksternal.
-        Gunakan parameter dari measure_config.json:
-        - ground: threshold kalibrasi & segmentasi
-        - noise_filter: nb_neighbors, std_ratio
-        - cluster: eps, min_points
-        - height_smoothing & dimension_smoothing: smoothing dan guard
-        """
-        if pts_in.shape[0] < 50:
-            return None
-
-        # --- Ambil konfigurasi ---
-        gconf = self.measure_cfg["ground"]
-        nconf = self.measure_cfg["noise_filter"]
-        cconf = self.measure_cfg["cluster"]
-        hconf = self.measure_cfg["height_smoothing"]
-        dconf = self.measure_cfg["dimension_smoothing"]
-
-        # --- Buat point cloud ---
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(pts_in)
-
-        # === 1) Pisahkan ground dengan RANSAC ===
-        work = pcd
-        ground_plane = None
-        if not assume_non_ground:
-            try:
-                plane_model, inliers = pcd.segment_plane(
-                    distance_threshold=gconf.get("distance_threshold", 0.10),
-                    ransac_n=gconf.get("ransac_n", 3),
-                    num_iterations=gconf.get("num_iterations", 300)
-                )
-                if len(inliers) >= 100:
-                    ground_plane = plane_model
-                    work = pcd.select_by_index(inliers, invert=True)
-            except Exception as e:
-                self.get_logger().warn(f"Ground segmentation gagal: {e}")
-
-        if work.is_empty():
-            return None
-
-        # === 2) Noise filter ===
-        work, _ = work.remove_statistical_outlier(
-            nb_neighbors=nconf.get("nb_neighbors", 20),
-            std_ratio=nconf.get("std_ratio", 2.0)
+        self.set_lidar_orientation(
+            g.get("lidar_tilt_deg", 30.0),
+            g.get("lidar_invert_z", True),
         )
-        if work.is_empty():
-            return None
-
-        # === 3) Pisahkan objek dengan DBSCAN ===
-        labels = np.array(
-            work.cluster_dbscan(
-                eps=cconf.get("eps", 0.2),
-                min_points=cconf.get("min_points", 10),
-                print_progress=False
-            )
-        )
-        if (labels >= 0).any():
-            counts = np.bincount(labels[labels >= 0])
-            main_label = np.argmax(counts)
-            obj_points = np.asarray(work.points)[labels == main_label]
-        else:
-            return None
-
-        if obj_points.shape[0] < 50:
-            return None
-
-        # === 4) Hitung dimensi kasar (PCA + Percentile) ===
-        XY = obj_points[:, :2]
-        Xc = XY - XY.mean(axis=0, keepdims=True)
-        cov = np.cov(Xc.T)
-        eigvals, eigvecs = np.linalg.eigh(cov)
-        eigvecs = eigvecs[:, np.argsort(eigvals)[::-1]]
-
-        # Stabilkan arah PCA (anti-flip)
-        if not hasattr(self, "_eigvecs_prev"):
-            self._eigvecs_prev = eigvecs.copy()
-        else:
-            for i in range(2):
-                if np.dot(eigvecs[:, i], self._eigvecs_prev[:, i]) < 0:
-                    eigvecs[:, i] *= -1
-            self._eigvecs_prev = eigvecs.copy()
-
-        proj = Xc @ eigvecs
-        p_low, p_high = np.percentile(proj[:, 0], [1, 99])
-        q_low, q_high = np.percentile(proj[:, 1], [1, 99])
-        length_raw = float(p_high - p_low)
-        width_raw = float(q_high - q_low)
-        if width_raw > length_raw:
-            length_raw, width_raw = width_raw, length_raw
-
-        # === 5) Koreksi tinggi berdasarkan ground ===
-        if ground_plane is not None:
-            a, b, c, d = ground_plane
-            n = np.array([a, b, c], dtype=float)
-            n_norm = np.linalg.norm(n) + 1e-12
-            hvals = (obj_points @ n + d) / n_norm
-            h2, h98 = np.percentile(hvals, [1, 99])
-            height_raw = float(h98 - h2)
-        elif self.ground_model is not None:
-            a, b, c, d = self.ground_model
-            n = np.array([a, b, c], dtype=float)
-            n_norm = np.linalg.norm(n) + 1e-12
-            hvals = (obj_points @ n + d) / n_norm
-            h2, h98 = np.percentile(hvals, [1, 99])
-            height_raw = float(h98 - h2)
-        else:
-            z2, z98 = np.percentile(obj_points[:, 2], [1, 99])
-            height_raw = float(z98 - z2)
-
-        # ======================================
-        # === Smoothing & Guard berbasis config
-        # ======================================
-
-        # --- Height smoothing ---
-        self._dim_hist_height.append(height_raw)
-        if len(self._dim_hist_height) > hconf.get("max_history", 30):
-            self._dim_hist_height.pop(0)
-        median_h = np.median(self._dim_hist_height)
-        guard_hi = hconf.get("guard_high", 1.25)
-        guard_lo = hconf.get("guard_low", 0.7)
-        if height_raw > guard_hi * median_h or height_raw < guard_lo * median_h:
-            height_raw = median_h
-        if self._last_height is not None:
-            height_raw = (
-                hconf.get("ema_factor_new", 0.2) * height_raw
-                + hconf.get("ema_factor_old", 0.85) * self._last_height
-            )
-        self._last_height = height_raw
-
-        # --- Length & width smoothing ---
-        self._dim_hist_xy.append([length_raw, width_raw])
-        if len(self._dim_hist_xy) > dconf.get("max_history", 30):
-            self._dim_hist_xy.pop(0)
-        xy_med = np.median(self._dim_hist_xy, axis=0)
-        dev_guard = dconf.get("deviation_guard", 0.15)
-
-        p_corr, l_corr = length_raw, width_raw
-        if abs(p_corr - xy_med[0]) > dev_guard * xy_med[0]:
-            p_corr = float(xy_med[0])
-        if abs(l_corr - xy_med[1]) > dev_guard * xy_med[1]:
-            l_corr = float(xy_med[1])
-
-        if self._last_xy is not None:
-            p_corr = (
-                dconf.get("ema_factor_length_new", 0.15) * p_corr
-                + dconf.get("ema_factor_length_old", 0.8) * float(self._last_xy[0])
-            )
-            l_corr = (
-                dconf.get("ema_factor_width_new", 0.15) * l_corr
-                + dconf.get("ema_factor_width_old", 0.85) * float(self._last_xy[1])
-            )
-        self._last_xy = np.array([p_corr, l_corr], dtype=np.float32)
-
-        # === Buat OBB untuk visualisasi ===
-        obb = None
-        try:
-            pcd_obj = o3d.geometry.PointCloud()
-            pcd_obj.points = o3d.utility.Vector3dVector(obj_points)
-            obb = pcd_obj.get_oriented_bounding_box()
-            obb.color = (1.0, 1.0, 0.0)
-        except Exception:
-            pass
-
-        return float(p_corr), float(l_corr), float(height_raw), obb
-
-
-
-
-    # ----------------- Callback ROS -----------------
-    def cb(self, msg):
-        # --- Batasi update rate sesuai frame_interval ---
-        now = self.get_clock().now()
-        dt = (now - self.last_update_time).nanoseconds * 1e-9
-        if dt < self.frame_interval:
-            return  # skip frame, terlalu cepat
-        self.last_update_time = now
-
-        cloud = list(pc2.read_points(msg, field_names=("x", "y", "z", "intensity"), skip_nans=True))
-        if not cloud:
-            return
-
-        pts = np.asarray([(p[0], p[1], p[2]) for p in cloud], dtype=np.float32)
-        inten = np.asarray([p[3] for p in cloud], dtype=np.float32)
-
-        # Transform LiDAR -> world
-        R_lidar = self.get_lidar_rotation_matrix()
-        pts = (R_lidar @ pts.T).T
-
-        # Colorize by intensity
-        cmap = plt.get_cmap("turbo")
-        inten_n = (inten - inten.min()) / (inten.ptp() + 1e-6)
-        cols = cmap(inten_n)[:, :3].astype(np.float32)
-
-        # ROI mask
-        bbox = self.create_roi_box()
-        roi_indices = bbox.get_point_indices_within_bounding_box(o3d.utility.Vector3dVector(pts))
-        roi_indices = np.array(roi_indices, dtype=int)
-        dim_text = "Belum ada objek terdeteksi"
-
-        # Prepare for OBB redraw
-        def remove_old_obb():
-            try:
-                self.scene.scene.remove_geometry(self._name_obb)
-            except Exception:
-                pass
-
-        remove_old_obb()
-
-        if len(roi_indices) > 50:
-            pts_roi = pts[roi_indices]
-
-            # Kalibrasi ground saat diminta
-            if self.is_calibrating:
-                try:
-                    pcd_roi = o3d.geometry.PointCloud()
-                    pcd_roi.points = o3d.utility.Vector3dVector(pts_roi)
-                    plane_model, inliers = pcd_roi.segment_plane(
-                        distance_threshold=self.calib_thresh, ransac_n=3, num_iterations=300
-                    )
-                    self.save_ground_model(plane_model)
-                    self.is_calibrating = False
-                    self.ground_model = plane_model
-                    a, b, c, d = plane_model
-                    self.get_logger().info(
-                        f"✅ Ground calibrated: a={a:.3f}, b={b:.3f}, c={c:.3f}, d={d:.3f}"
-                    )
-                    self.show_toast("Kalibrasi ground selesai")
-                except Exception as e:
-                    self.is_calibrating = False
-                    self.get_logger().warn(f"Kalibrasi gagal: {e}")
-                    self.show_toast("Kalibrasi gagal")
-
-            # Color ground (opsional) + non-ground extraction untuk measure
-            assume_non_ground = False
-            pts_for_measure = pts_roi
-            if self.ground_model is not None:
-                a, b, c, d = self.ground_model
-                denom = np.sqrt(a ** 2 + b ** 2 + c ** 2) + 1e-9
-                heights = np.abs((a * pts_roi[:, 0] + b * pts_roi[:, 1] + c * pts_roi[:, 2] + d) / denom)
-                ground_mask = heights < self.ground_thresh
-                non_ground_mask = ~ground_mask
-                if self.show_ground_color:
-                    # hanya warnai ground jadi hijau, tidak mematikan deteksi
-                    cols[roi_indices[ground_mask]] = [0.0, 1.0, 0.0]
-                # Gunakan hanya non-ground untuk pengukuran
-                if non_ground_mask.sum() > 20:
-                    pts_for_measure = pts_roi[non_ground_mask]
-                    assume_non_ground = True
-
-            # Ukur dimensi stabil
-            result = self.measure_dims_stable(pts_for_measure, assume_non_ground=assume_non_ground)
-            if result is not None:
-                P, L, T, obb = result
-                dim_text = f"Objek: P={P:.3f} m, L={L:.3f} m, T={T:.3f} m"
-                print(dim_text)
-
-                try:
-                    print("sending to gui directly via shared mem")
-                    if self.p_val is not None and self.data_event is not None:
-                        # --- Jika tinggi < 20 cm → anggap tidak ada objek ---
-                        # if T < 0.20:
-                        #     P = 0
-                        #     L = 0
-                        #     T = 0
-
-                        self.p_val.value = P
-                        self.l_val.value = L
-                        self.t_val.value = T
-                        self.data_event.set()  # Signal ke GUI bahwa data ready
-                    threading.Thread(target=upload, args=(P, L, T), daemon=True).start()
-                except Exception as e:
-                    print(f"nope, sending error: {type(e).__name__} - {str(e)}")
-                    pass
-
-                if obb is not None:
-                    mat_box = rendering.MaterialRecord()
-                    mat_box.shader = "unlitLine"
-                    mat_box.line_width = 4.0
-                    self.scene.scene.add_geometry(self._name_obb, obb, mat_box)
-
-        # Update label di UI
-        gui.Application.instance.post_to_main_thread(
-            self.window, lambda: setattr(self.dim_label, "text", dim_text)
-        )
-
-        # Update point cloud
-        self.pcd.points = o3d.utility.Vector3dVector(pts)
-        self.pcd.colors = o3d.utility.Vector3dVector(cols)
-
-        def update_scene():
-            # Clear hanya geometri dinamis, lalu re-add
-            self.scene.scene.clear_geometry()
-            self.scene.scene.add_geometry(self._name_cloud, self.pcd, rendering.MaterialRecord())
-            self.scene.scene.add_geometry(self._name_roi, self.roi_box, self.roi_material())
-            # OBB jika ada sudah ditambahkan di atas (akan hilang saat clear, jadi re-add bila perlu)
-            # Untuk kesederhanaan, bila obb dibuat pada frame ini sudah ditambahkan; kalau ingin persist,
-            # bisa simpan dan re-add di sini.
-
-            if not self._camera_set:
-                bbox = self.pcd.get_axis_aligned_bounding_box()
-                center = bbox.get_center()
-                radius = np.linalg.norm(bbox.get_extent()) * 0.5 + 1.0
-                eye = center + np.array([radius, radius, radius])
-                self.scene.scene.camera.look_at(center.tolist(), eye.tolist(), [0, 0, 1])
-                self._camera_set = True
-            self.scene.force_redraw()
-
-        gui.Application.instance.post_to_main_thread(self.window, update_scene)
-
-    # ----------------- Layout -----------------
-    def on_layout(self, ctx):
-        r = self.window.content_rect
-        self.scene.frame = gui.Rect(r.x, r.y, r.width, r.height)
-
-    def show_window(self):
-        self.window.show(True)
-        self.get_logger().info("A window has appear")
-        self.scene.force_redraw()
-
-    def hide_window(self):
-        self.window.show(False)
-        self.get_logger().info("The window is hidden")
-        self.scene.force_redraw()
-
-    def toggle_window(self):
-        if self.window.is_visible:
-            self.hide_window()
-        else:
-            self.show_window()
-
-class LivoxCalib(Node):
-    def __init__(self, app, p_val=None, l_val=None, t_val=None, data_event=None):
-        global GUI_INSTANCE
-        super().__init__("livox_open3d_calib")
-        # ==== Load konfigurasi JSON ====
-        self.measure_cfg = load_measure_config()
-
-        # Terapkan parameter umum
-        g = self.measure_cfg["general"]
-        self.frame_interval = g["frame_interval"]
-        self.point_size = g["point_size"]
-        self.set_lidar_orientation(g["lidar_tilt_deg"], g["lidar_invert_z"])
-
-        gr = self.measure_cfg["ground"]
-        self.ground_thresh = gr["ground_thresh"]
-        self.calib_thresh = gr["calib_thresh"]
-
-        # Jalankan watcher agar reload otomatis bila file JSON berubah
-        threading.Thread(target=watch_measure_config, args=(self,), daemon=True).start()
-
-        qos = QoSProfile(
-            reliability=ReliabilityPolicy.BEST_EFFORT,
-            history=HistoryPolicy.KEEP_LAST,
-            depth=1
-        )
-        self.sub = self.create_subscription(PointCloud2, "/livox/lidar", self.cb, qos)
-
-        self.p_val = p_val
-        self.l_val = l_val
-        self.t_val = t_val
-        self.data_event = data_event
-
-        self.app = app
-        self.window = app.create_window("Livox MID360 - Open3D GUI", 1600, 900)
-        
-        # flag_path = "/tmp/lidar_calib_visible"
-        # if os.path.exists(flag_path):
-        #     os.remove(flag_path)
-        # self.window.show(False)
-
-        # def on_close():
-        #     self.hide_window()
-        #     flag_path = "/tmp/lidar_calib_visible"
-        #     if os.path.exists(flag_path):
-        #         os.remove(flag_path)
-        #     return False
-        
-        GUI_INSTANCE = self
-        # self.window.set_on_close(on_close)
-
-        self.scene = gui.SceneWidget()
-        self.scene.scene = rendering.Open3DScene(self.window.renderer)
-        self.window.add_child(self.scene)
-        self.dim_label = gui.Label("Belum ada objek terdeteksi")
-
-        self.scene.scene.set_background([0, 0, 0, 1])
-        self.scene.scene.show_axes(True)
-
-        self.pcd = o3d.geometry.PointCloud()
-        self._camera_set = False
-        # ==== Frame & point size control ====
-        self.last_update_time = self.get_clock().now()
-        self.frame_interval = 0.1   # detik per frame (0.1 = 10 Hz)
-        self.point_size = 5.0       # ukuran titik point cloud
-
-        # === Geometry names to manage on scene ===
-        self._name_cloud = "PointCloud"
-        self._name_roi = "ROI"
-        self._name_obb = "StableOBB"
-
-        # Flags & params
-        self.show_ground_color = True         # hanya mematikan warna, bukan deteksi
-        self.ground_model = None
-        self.is_calibrating = False
-        self.ground_thresh = 0.03             # <— lebih ketat dari 0.08, bisa disesuaikan
-        self.calib_thresh = 0.02              # RANSAC distance saat kalibrasi
-
-        # Smoothing state
-        self._dim_hist_height = []
-        self._last_height = None
-        self._dim_hist_xy = []
-        self._last_xy = None
-
-        # ==== ROI default ====
-        self.roi_center = np.array([0.0, 0.0, 0.0])
-        self.roi_size   = np.array([2.0, 2.0, 1.0])
-        self.roi_rpy    = np.array([0.0, 0.0, 0.0])
-
-        # ==== TOAST ====
-        self.toast_label = gui.Label("")
-        self._toast_counter = 0
-
-        # ==== Orientasi LiDAR ====
-        self.set_lidar_orientation(tilt_deg=30.0, invert_z=True)
 
         # ==== Load ROI config ====
         self.load_roi_from_file()
@@ -939,7 +360,7 @@ class LivoxCalib(Node):
         self.roi_box = self.create_roi_box()
         self.scene.scene.add_geometry(self._name_roi, self.roi_box, self.roi_material())
 
-        # ==== Panel GUI ====
+        # ==== Panel GUI (untuk CALIB mode) ====
         em = self.window.theme.font_size
         margin = 0.5 * em
         self.panel = gui.Vert(margin, gui.Margins(margin, margin, margin, margin))
@@ -954,9 +375,9 @@ class LivoxCalib(Node):
         self.panel.add_child(self.make_plus_minus_row("Size Y", "roi_size", 1, 0.1))
         self.panel.add_child(self.make_plus_minus_row("Size Z", "roi_size", 2, 0.1))
         self.panel.add_child(gui.Label("Rotation (deg)"))
-        self.panel.add_child(self.make_plus_minus_row("Roll",  "roi_rpy", 0, 0.5))
+        self.panel.add_child(self.make_plus_minus_row("Roll", "roi_rpy", 0, 0.5))
         self.panel.add_child(self.make_plus_minus_row("Pitch", "roi_rpy", 1, 0.5))
-        self.panel.add_child(self.make_plus_minus_row("Yaw",   "roi_rpy", 2, 0.5))
+        self.panel.add_child(self.make_plus_minus_row("Yaw", "roi_rpy", 2, 0.5))
 
         # Buttons utama
         save_btn = gui.Button("Save ROI")
@@ -988,13 +409,107 @@ class LivoxCalib(Node):
         self.window.add_child(self.panel)
         self.window.set_on_layout(self.on_layout)
 
-        # ==== Load ground model kalau ada ====
+        # ==== Ground model ====
         if os.path.exists(GROUND_MODEL_PATH):
             self.load_ground_model()
 
+        # Material cloud
+        self._cloud_material = rendering.MaterialRecord()
+        self._cloud_material.shader = "defaultUnlit"
+        self._cloud_material.point_size = self.point_size
+
+        # ==== Monitor flags ====
+        self.monitoring = threading.Thread(target=self.monitor_window_flag, daemon=True)
+        self.monitoring.start()
+
+        self.mode_monitor = threading.Thread(target=self.monitor_mode_flag, daemon=True)
+        self.mode_monitor.start()
+
+        # Set mode awal sesuai flag
+        self.set_calib_mode(os.path.exists(CALIB_MODE_FLAG_PATH))
+
         self.get_logger().info("✅ GUI aktif + ROI + Ground Calibration + Stable Dimension Measure")
 
+    def debug_watchdog(self):
+        """Pantau delay abnormal pada ROS callback, render, dan DB worker."""
+        global ROS_FRAME_TIME, RENDER_TIME
+
+        while True:
+            time.sleep(0.3)
+
+            if ROS_FRAME_TIME > 0.5:
+                print(f"[FATAL][WATCHDOG] ROS callback delay: {ROS_FRAME_TIME*1000:.0f} ms")
+
+            if RENDER_TIME > 0.5:
+                print(f"[FATAL][WATCHDOG] Open3D redraw delay: {RENDER_TIME*1000:.0f} ms")
+
+    # ---------------------- FLAG MONITOR ----------------------
+
+    def monitor_window_flag(self):
+        """Pantau file /tmp/lidar_visible untuk show/hide window dari proses Tkinter."""
+        while True:
+            should_be_visible = os.path.exists(VISIBLE_FLAG_PATH)
+            current_visible = self.window.is_visible
+
+            if should_be_visible and not current_visible:
+                def do_show():
+                    self.show_window()
+                    self.get_logger().info("Window SHOW command sent")
+                gui.Application.instance.post_to_main_thread(self.window, do_show)
+
+            elif not should_be_visible and current_visible:
+                def do_hide():
+                    self.hide_window()
+                    self.get_logger().info("Window HIDE command sent")
+                gui.Application.instance.post_to_main_thread(self.window, do_hide)
+
+            threading.Event().wait(0.3)
+
+    def monitor_mode_flag(self):
+        """Pantau file /tmp/lidar_calib_mode untuk switch HOME <-> CALIB mode."""
+        last_state = None
+        while True:
+            state = os.path.exists(CALIB_MODE_FLAG_PATH)  # True = CALIB, False = HOME
+            if state != last_state:
+                last_state = state
+                gui.Application.instance.post_to_main_thread(
+                    self.window,
+                    lambda s=state: self.set_calib_mode(s)
+                )
+            time.sleep(0.3)
+
+    def set_calib_mode(self, is_calib: bool):
+        self._is_calib_mode = bool(is_calib)
+        mode_str = "CALIB" if self._is_calib_mode else "HOME"
+        self.get_logger().info(f"🔁 Switch viewer mode -> {mode_str}")
+
+        # Resize window sesuai mode
+        def resize():
+            if self._is_calib_mode:
+                # Mode CALIB -> besar
+                self.window.size = gui.Size(1600, 900)
+                try:
+                    self.window.set_position(300, 300)
+                except:
+                    pass
+            else:
+                # Mode HOME -> kecil
+                self.window.size = gui.Size(900, 600)
+                try:
+                    self.window.set_position(500, 500)
+                except:
+                    pass
+
+            self.window.set_needs_layout()
+            self.scene.force_redraw()
+
+
+        gui.Application.instance.post_to_main_thread(self.window, resize)
+
+
+
     # ---------------------- UI util ----------------------
+
     def show_toast(self, text, duration=0.8):
         self._toast_counter += 1
         my_id = self._toast_counter
@@ -1007,7 +522,10 @@ class LivoxCalib(Node):
                 self.toast_label.text = ""
 
         gui.Application.instance.post_to_main_thread(self.window, _show)
-        t = threading.Timer(duration, lambda: gui.Application.instance.post_to_main_thread(self.window, _clear_if_same))
+        t = threading.Timer(
+            duration,
+            lambda: gui.Application.instance.post_to_main_thread(self.window, _clear_if_same),
+        )
         t.daemon = True
         t.start()
 
@@ -1035,16 +553,16 @@ class LivoxCalib(Node):
 
         h.add_stretch()
         h.add_child(value)
-        
         h.add_stretch()
         h.add_child(minus_btn)
         h.add_child(plus_btn)
         return h
 
     # ----------------- Lidar orientation -----------------
+
     def set_lidar_orientation(self, tilt_deg=30.0, invert_z=True):
-        self.lidar_tilt_deg = tilt_deg
-        self.lidar_invert_z = invert_z
+        self.lidar_tilt_deg = float(tilt_deg)
+        self.lidar_invert_z = bool(invert_z)
 
     def get_lidar_rotation_matrix(self):
         tilt_rad = np.deg2rad(self.lidar_tilt_deg)
@@ -1065,6 +583,7 @@ class LivoxCalib(Node):
         self.show_toast(f"Ground color {state}")
 
     # ----------------- ROI helpers -----------------
+
     def roi_material(self):
         mat = rendering.MaterialRecord()
         mat.shader = "unlitLine"
@@ -1073,9 +592,25 @@ class LivoxCalib(Node):
 
     def euler_to_rotation_matrix(self, roll, pitch, yaw):
         r, p, y = np.deg2rad([roll, pitch, yaw])
-        Rx = np.array([[1, 0, 0], [0, np.cos(r), -np.sin(r)], [0, np.sin(r), np.cos(r)]])
-        Ry = np.array([[ np.cos(p), 0, np.sin(p)], [0, 1, 0], [-np.sin(p), 0, np.cos(p)]])
-        Rz = np.array([[ np.cos(y), -np.sin(y), 0], [np.sin(y), np.cos(y), 0], [0, 0, 1]])
+
+        Rx = np.array([
+            [1, 0, 0],
+            [0, np.cos(r), -np.sin(r)],
+            [0, np.sin(r),  np.cos(r)]
+        ])
+
+        Ry = np.array([
+            [ np.cos(p), 0, np.sin(p)],
+            [0, 1, 0],
+            [-np.sin(p), 0, np.cos(p)]
+        ])
+
+        Rz = np.array([
+            [ np.cos(y), -np.sin(y), 0],
+            [ np.sin(y),  np.cos(y), 0],
+            [0, 0, 1]
+        ])
+
         return Rz @ Ry @ Rx
 
     def create_roi_box(self):
@@ -1085,15 +620,18 @@ class LivoxCalib(Node):
         return bbox
 
     def update_roi_box(self):
+        # Dipanggil dari GUI thread (on_click), jadi aman langsung ke scene
         try:
             self.scene.scene.remove_geometry(self._name_roi)
         except Exception:
             pass
         self.roi_box = self.create_roi_box()
         self.scene.scene.add_geometry(self._name_roi, self.roi_box, self.roi_material())
-        self.scene.force_redraw()
+        if self.window.is_visible:
+            self.scene.force_redraw()
 
     # ----------------- Ground Calibration -----------------
+
     def calibrate_ground(self):
         self.is_calibrating = True
         self.get_logger().info("📏 Calibrating ground plane... (tunggu beberapa frame)")
@@ -1110,36 +648,43 @@ class LivoxCalib(Node):
             self.get_logger().info(f"📂 Ground model loaded from {GROUND_MODEL_PATH}")
             self.show_toast("Ground model dimuat")
         else:
+            self.ground_model = None
             self.get_logger().warn("❌ Belum ada model ground, lakukan kalibrasi dahulu!")
             self.show_toast("Belum ada ground model")
 
     # ----------------- ROI persistence -----------------
+
     def save_roi_to_file(self):
-        data = {"center": self.roi_center.tolist(), "size": self.roi_size.tolist(), "rpy": self.roi_rpy.tolist()}
+        data = {
+            "center": self.roi_center.tolist(),
+            "size": self.roi_size.tolist(),
+            "rpy": self.roi_rpy.tolist(),
+        }
         with open(CONFIG_PATH, "w") as f:
             json.dump(data, f, indent=2)
         self.get_logger().info(f"💾 ROI saved to {CONFIG_PATH}")
         self.show_toast("ROI disimpan")
 
     def load_roi_from_file(self):
-        # os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
         if os.path.exists(CONFIG_PATH):
             with open(CONFIG_PATH, "r") as f:
                 data = json.load(f)
             self.roi_center = np.array(data.get("center", [0, 0, 0]), dtype=float)
-            self.roi_size   = np.array(data.get("size",   [2, 2, 1]), dtype=float)
-            self.roi_rpy    = np.array(data.get("rpy",    [0, 0, 0]), dtype=float)
+            self.roi_size = np.array(data.get("size", [2, 2, 1]), dtype=float)
+            self.roi_rpy = np.array(data.get("rpy", [0, 0, 0]), dtype=float)
             print(f"[INFO] ROI loaded from {CONFIG_PATH}")
         else:
             print("[INFO] No saved ROI config found, using defaults")
 
     def reset_roi(self):
         self.roi_center = np.array([0.0, 0.0, 0.0])
-        self.roi_size   = np.array([2.0, 2.0, 1.0])
-        self.roi_rpy    = np.array([0.0, 0.0, 0.0])
+        self.roi_size = np.array([2.0, 2.0, 1.0])
+        self.roi_rpy = np.array([0.0, 0.0, 0.0])
         self.update_roi_box()
         self.get_logger().info("🔄 ROI reset ke default")
         self.show_toast("ROI di-reset")
+
+    # ----------------- Stable dimension measure -----------------
 
     # ----------------- Stable dimension measure -----------------
     def measure_dims_stable(self, pts_in, assume_non_ground=False):
@@ -1309,190 +854,262 @@ class LivoxCalib(Node):
 
         return float(p_corr), float(l_corr), float(height_raw), obb
 
-
-
-
     # ----------------- Callback ROS -----------------
+
     def cb(self, msg):
-        # --- Batasi update rate sesuai frame_interval ---
-        now = self.get_clock().now()
-        dt = (now - self.last_update_time).nanoseconds * 1e-9
-        if dt < self.frame_interval:
-            return  # skip frame, terlalu cepat
-        self.last_update_time = now
-        
-        cloud = list(pc2.read_points(msg, field_names=("x", "y", "z", "intensity"), skip_nans=True))
-        if not cloud:
-            return
+        """Callback ROS yang aman dari crash dan tidak menyebabkan freeze."""
+        try:
+            start_ros = time.time()
 
-        pts = np.asarray([(p[0], p[1], p[2]) for p in cloud], dtype=np.float32)
-        inten = np.asarray([p[3] for p in cloud], dtype=np.float32)
+            # --- Batasi update rate sesuai frame_interval ---
+            now = self.get_clock().now()
+            dt = (now - self.last_update_time).nanoseconds * 1e-9
+            if dt < self.frame_interval:
+                return
 
-        # Transform LiDAR -> world
-        R_lidar = self.get_lidar_rotation_matrix()
-        pts = (R_lidar @ pts.T).T
+            self.last_update_time = now
 
-        # Colorize by intensity
-        cmap = plt.get_cmap("turbo")
-        inten_n = (inten - inten.min()) / (inten.ptp() + 1e-6)
-        cols = cmap(inten_n)[:, :3].astype(np.float32)
-
-        # ROI mask
-        bbox = self.create_roi_box()
-        roi_indices = bbox.get_point_indices_within_bounding_box(o3d.utility.Vector3dVector(pts))
-        roi_indices = np.array(roi_indices, dtype=int)
-        dim_text = "Belum ada objek terdeteksi"
-
-        # Prepare for OBB redraw
-        def remove_old_obb():
+            # ===============================
+            # 1. BACA POINTCLOUD DENGAN AMAN
+            # ===============================
             try:
-                self.scene.scene.remove_geometry(self._name_obb)
-            except Exception:
-                pass
+                cloud = list(pc2.read_points(
+                    msg,
+                    field_names=("x", "y", "z", "intensity"),
+                    skip_nans=True
+                ))
+            except Exception as e:
+                self.get_logger().warn(f"read_points error: {e}")
+                return
 
-        remove_old_obb()
+            if not cloud:
+                return
 
-        if len(roi_indices) > 50:
-            pts_roi = pts[roi_indices]
+            # Debug aman (tidak pernah crash)
+            if DEBUG_MODE:
+                self.get_logger().info(f"Cloud size: {len(cloud)}")
 
-            # Kalibrasi ground saat diminta
-            if self.is_calibrating:
+            # ===============================
+            # 2. KONVERSI KE NUMPY
+            # ===============================
+            try:
+                pts = np.asarray([(p[0], p[1], p[2]) for p in cloud], dtype=np.float32)
+                inten = np.asarray([p[3] for p in cloud], dtype=np.float32)
+            except Exception as e:
+                self.get_logger().warn(f"convert to numpy error: {e}")
+                return
+
+            # ===============================
+            # 3. TRANSFORMASI LIDAR
+            # ===============================
+            try:
+                R_lidar = self.get_lidar_rotation_matrix()
+                pts = (R_lidar @ pts.T).T
+            except Exception as e:
+                self.get_logger().warn(f"lidar rotation error: {e}")
+                return
+
+            # ===============================
+            # 4. COLORING
+            # ===============================
+            try:
+                inten_n = (inten - inten.min()) / (inten.ptp() + 1e-6)
+                cols = self._cmap(inten_n)[:, :3].astype(np.float32)
+            except Exception as e:
+                self.get_logger().warn(f"color map error: {e}")
+                return
+
+            # ===============================
+            # 5. ROI FILTER
+            # ===============================
+            try:
+                bbox = self.roi_box  # gunakan ROI yang sudah dibuat, jangan create baru
+                roi_indices = bbox.get_point_indices_within_bounding_box(
+                    o3d.utility.Vector3dVector(pts)
+                )
+                roi_indices = np.array(roi_indices, dtype=int)
+            except Exception as e:
+                self.get_logger().warn(f"ROI filter error: {e}")
+                return
+
+            dim_text = "Belum ada objek terdeteksi"
+            local_obb = None
+
+            # ===============================
+            # 6. DIMENSION EXTRACTION
+            # ===============================
+            if len(roi_indices) > 50:
+                pts_roi = pts[roi_indices]
+
+                # Ground calibrate mode
+                if self.is_calibrating:
+                    try:
+                        pcd_roi = o3d.geometry.PointCloud()
+                        pcd_roi.points = o3d.utility.Vector3dVector(pts_roi)
+                        plane_model, inliers = pcd_roi.segment_plane(
+                            distance_threshold=self.calib_thresh,
+                            ransac_n=3,
+                            num_iterations=300
+                        )
+                        self.save_ground_model(plane_model)
+                        self.ground_model = plane_model
+                        self.is_calibrating = False
+                        self.show_toast("Kalibrasi ground selesai")
+                    except Exception as e:
+                        self.is_calibrating = False
+                        self.get_logger().warn(f"calibrate error: {e}")
+                        self.show_toast("Kalibrasi gagal")
+
+                # Ground separation (opsional)
+                assume_non_ground = False
+                pts_for_measure = pts_roi
+
                 try:
-                    pcd_roi = o3d.geometry.PointCloud()
-                    pcd_roi.points = o3d.utility.Vector3dVector(pts_roi)
-                    plane_model, inliers = pcd_roi.segment_plane(
-                        distance_threshold=self.calib_thresh, ransac_n=3, num_iterations=300
-                    )
-                    self.save_ground_model(plane_model)
-                    self.is_calibrating = False
-                    self.ground_model = plane_model
-                    a, b, c, d = plane_model
-                    self.get_logger().info(
-                        f"✅ Ground calibrated: a={a:.3f}, b={b:.3f}, c={c:.3f}, d={d:.3f}"
-                    )
-                    self.show_toast("Kalibrasi ground selesai")
+                    if self.ground_model is not None:
+                        a, b, c, d = self.ground_model
+                        denom = np.sqrt(a*a + b*b + c*c) + 1e-9
+                        heights = np.abs((a*pts_roi[:,0] + b*pts_roi[:,1] +
+                                        c*pts_roi[:,2] + d) / denom)
+                        ground_mask = heights < self.ground_thresh
+                        non_ground_mask = ~ground_mask
+
+                        if self.show_ground_color:
+                            cols[roi_indices[ground_mask]] = [0.0, 1.0, 0.0]
+
+                        if non_ground_mask.sum() > 20:
+                            pts_for_measure = pts_roi[non_ground_mask]
+                            assume_non_ground = True
+
                 except Exception as e:
-                    self.is_calibrating = False
-                    self.get_logger().warn(f"Kalibrasi gagal: {e}")
-                    self.show_toast("Kalibrasi gagal")
+                    self.get_logger().warn(f"ground filter error: {e}")
 
-            # Color ground (opsional) + non-ground extraction untuk measure
-            assume_non_ground = False
-            pts_for_measure = pts_roi
-            if self.ground_model is not None:
-                a, b, c, d = self.ground_model
-                denom = np.sqrt(a ** 2 + b ** 2 + c ** 2) + 1e-9
-                heights = np.abs((a * pts_roi[:, 0] + b * pts_roi[:, 1] + c * pts_roi[:, 2] + d) / denom)
-                ground_mask = heights < self.ground_thresh
-                non_ground_mask = ~ground_mask
-                if self.show_ground_color:
-                    # hanya warnai ground jadi hijau, tidak mematikan deteksi
-                    cols[roi_indices[ground_mask]] = [0.0, 1.0, 0.0]
-                # Gunakan hanya non-ground untuk pengukuran
-                if non_ground_mask.sum() > 20:
-                    pts_for_measure = pts_roi[non_ground_mask]
-                    assume_non_ground = True
-
-            # Ukur dimensi stabil
-            result = self.measure_dims_stable(pts_for_measure, assume_non_ground=assume_non_ground)
-            if result is not None:
-                P, L, T, obb = result
-                dim_text = f"Objek: P={P:.3f} m, L={L:.3f} m, T={T:.3f} m"
-                print(dim_text)
-
+                # Hitung dimensi aman
                 try:
-                    print("sending to gui directly via shared mem")
-                    if self.p_val is not None and self.data_event is not None:
-                        # --- Jika tinggi < 20 cm → anggap tidak ada objek ---
-                        # if T < 0.20:
-                        #     P = 0
-                        #     L = 0
-                        #     T = 0
+                    result = self.measure_dims_stable(
+                        pts_for_measure,
+                        assume_non_ground=assume_non_ground
+                    )
+                except Exception as e:
+                    self.get_logger().warn(f"measure_dims_stable error: {e}")
+                    result = None
 
+                if result is not None:
+                    P, L, T, obb = result
+                    dim_text = f"Objek: P={P:.3f} m, L={L:.3f} m, T={T:.3f} m"
+
+                    local_obb = obb
+
+                    # Shared mem ke Tkinter
+                    try:
                         self.p_val.value = P
                         self.l_val.value = L
                         self.t_val.value = T
-                        self.data_event.set()  # Signal ke GUI bahwa data ready
-                    threading.Thread(target=upload, args=(P, L, T), daemon=True).start()
+                        self.data_event.set()
+                    except Exception:
+                        pass
+
+                    # Queue DB
+                    try:
+                        MEASURE_QUEUE.put_nowait((P, L, T))
+                    except:
+                        pass
+
+            # ===============================
+            # 7. UPDATE UI
+            # ===============================
+            try:
+                gui.Application.instance.post_to_main_thread(
+                    self.window, lambda: setattr(self.dim_label, "text", dim_text)
+                )
+            except:
+                pass
+
+            # ===============================
+            # 8. UPDATE POINTCLOUD
+            # ===============================
+            self.pcd.points = o3d.utility.Vector3dVector(pts)
+            self.pcd.colors = o3d.utility.Vector3dVector(cols)
+            self._latest_obb = local_obb
+
+            # ===============================
+            # 9. UPDATE SCENE DI MAIN THREAD
+            # ===============================
+            def update_scene():
+                try:
+                    if not self.window.is_visible:
+                        return
+
+                    if self.scene.scene.has_geometry(self._name_cloud):
+                        self.scene.scene.remove_geometry(self._name_cloud)
+
+                    self.scene.scene.add_geometry(self._name_cloud, self.pcd, self._cloud_material)
+
+                    # Clear old OBB
+                    try:
+                        if self.scene.scene.has_geometry(self._name_obb):
+                            self.scene.scene.remove_geometry(self._name_obb)
+                    except:
+                        pass
+
+                    if self._latest_obb is not None:
+                        mat_box = rendering.MaterialRecord()
+                        mat_box.shader = "unlitLine"
+                        mat_box.line_width = 4.0
+                        self.scene.scene.add_geometry(self._name_obb, self._latest_obb, mat_box)
+
+                    # Kamera hanya 1x
+                    if not self._camera_set and len(self.pcd.points) > 0:
+                        bbox = self.pcd.get_axis_aligned_bounding_box()
+                        center = bbox.get_center()
+                        radius = np.linalg.norm(bbox.get_extent()) * 0.5 + 1.0
+                        eye = center + np.array([radius, radius, radius])
+                        self.scene.scene.camera.look_at(center.tolist(), eye.tolist(), [0, 0, 1])
+                        self._camera_set = True
+
+                    self.scene.force_redraw()
+
                 except Exception as e:
-                    print(f"nope, sending error: {type(e).__name__} - {str(e)}")
-                    pass
+                    self.get_logger().warn(f"update_scene error: {e}")
 
-                if obb is not None:
-                    mat_box = rendering.MaterialRecord()
-                    mat_box.shader = "unlitLine"
-                    mat_box.line_width = 4.0
-                    self.scene.scene.add_geometry(self._name_obb, obb, mat_box)
+            gui.Application.instance.post_to_main_thread(self.window, update_scene)
 
-        # Update label di UI
-        gui.Application.instance.post_to_main_thread(
-            self.window, lambda: setattr(self.dim_label, "text", dim_text)
-        )
+            # ===============================
+            # 10. WATCHDOG
+            # ===============================
+            global ROS_FRAME_TIME
+            ROS_FRAME_TIME = time.time() - start_ros
 
-        # Update point cloud
-        self.pcd.points = o3d.utility.Vector3dVector(pts)
-        self.pcd.colors = o3d.utility.Vector3dVector(cols)
-
-        def update_scene():
-            # Clear hanya geometri dinamis, lalu re-add
-            self.scene.scene.clear_geometry()
-            self.scene.scene.add_geometry(self._name_cloud, self.pcd, rendering.MaterialRecord())
-            self.scene.scene.add_geometry(self._name_roi, self.roi_box, self.roi_material())
-            # OBB jika ada sudah ditambahkan di atas (akan hilang saat clear, jadi re-add bila perlu)
-            # Untuk kesederhanaan, bila obb dibuat pada frame ini sudah ditambahkan; kalau ingin persist,
-            # bisa simpan dan re-add di sini.
-
-            if not self._camera_set:
-                bbox = self.pcd.get_axis_aligned_bounding_box()
-                center = bbox.get_center()
-                radius = np.linalg.norm(bbox.get_extent()) * 0.5 + 1.0
-                eye = center + np.array([radius, radius, radius])
-                self.scene.scene.camera.look_at(center.tolist(), eye.tolist(), [0, 0, 1])
-                self._camera_set = True
-            self.scene.force_redraw()
-
-        gui.Application.instance.post_to_main_thread(self.window, update_scene)
+        except Exception as err:
+            # Jika apapun error di level tertinggi → jangan crash thread ROS
+            self.get_logger().error(f"FATAL ERROR IN CALLBACK: {type(err).__name__}: {err}")
+            return
 
     # ----------------- Layout -----------------
+
     def on_layout(self, ctx):
         r = self.window.content_rect
-        panel_width = 360
-        self.scene.frame = gui.Rect(r.x, r.y, r.width, r.height)
-        self.panel.frame = gui.Rect(r.get_right() - panel_width, r.y, panel_width, r.height)
+        panel_width = 360 if self._is_calib_mode else 0
+
+        self.scene.frame = gui.Rect(r.x, r.y, r.width - panel_width, r.height)
+
+        if panel_width > 0:
+            self.panel.frame = gui.Rect(r.get_right() - panel_width, r.y, panel_width, r.height)
+        else:
+            self.panel.frame = gui.Rect(r.get_right(), r.y, 0, r.height)
+
+    # ----------------- Window visibility helpers -----------------
 
     def show_window(self):
         self.window.show(True)
-        self.get_logger().info("A window has appear")
+        self.get_logger().info("Viewer window shown")
         self.scene.force_redraw()
 
     def hide_window(self):
         self.window.show(False)
-        self.get_logger().info("The window is hidden")
-        self.scene.force_redraw()
+        self.get_logger().info("Viewer window hidden")
 
     def toggle_window(self):
         if self.window.is_visible:
             self.hide_window()
         else:
             self.show_window()
-
-# ----------------- Main -----------------
-# def main(args=None):
-#     global GUI_INSTANCE
-#     rclpy.init(args=args)
-#     app = gui.Application.instance
-#     app.initialize()
-
-#     node = LivoxGUI(app)
-#     ros_t = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
-#     ros_t.start()
-
-#     app.run()
-
-#     node.save_roi_to_file()
-#     node.destroy_node()
-#     rclpy.shutdown()
-
-
-# if __name__ == "__main__":
-#     main()

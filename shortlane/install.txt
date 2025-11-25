@@ -6,3 +6,5 @@ pip install rclpy sensor-msgs-py
 pip install PyMySQL mysql-connector-python
 sudo apt install python3-tk libgl1-mesa-glx
 pip install watchdog
+sudo apt install xdotool wmctrl
+

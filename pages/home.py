@@ -1,210 +1,231 @@
 import os
 import time
-import queue
-import rclpy
 import signal
-import pymysql
 import threading
 import customtkinter as ctk
-import components.header as header
 import open3d.visualization.gui as gui
+import rclpy
+
+import components.header as header
 import components.connection_check as connection_check
 
-from components.lidar_viewer import LivoxGUI
-from rclpy.executors import MultiThreadedExecutor
 from multiprocessing import Process, Value, Event
+import atexit
+from components.lidar_viewer import LivoxCalib
 
-# DIMENSION_QUEUE = Queue(maxsize=1000)
+# ================= GLOBAL =================
+
 PROCESS = []
 
-P_VAL = Value('d', 0.0)
-L_VAL = Value('d', 0.0)
-T_VAL = Value('d', 0.0)
+P_VAL = Value("d", 0.0)
+L_VAL = Value("d", 0.0)
+T_VAL = Value("d", 0.0)
 DATA_EVENT = Event()
 
-def kill():
-    print("Killing processes...")
-    os.system("pkill -f 'livox_ros_driver2'")
+VISIBLE_FLAG_PATH = "/tmp/lidar_visible"
+CALIB_FLAG_PATH = "/tmp/lidar_calib_mode"
+
+
+# ================= PROCESS CONTROL ================
+
+def kill_viewer():
+    """Matikan child viewer secara keras + bersih."""
+    print("[HOME] Killing viewer process...")
+
     for p in PROCESS:
         if p.is_alive():
-            print(f"Terminating process {p.pid}...")
-            os.kill(p.pid, signal.SIGTERM)
-            p.join(timeout=2)
+            try:
+                os.kill(p.pid, signal.SIGTERM)
+                p.join(timeout=0.5)
+            except Exception:
+                pass
+
             if p.is_alive():
-                print(f"Process {p.pid} did not terminate, killing...")
-                os.kill(p.pid, signal.SIGKILL)
-                p.join()
+                try:
+                    os.kill(p.pid, signal.SIGKILL)
+                except Exception:
+                    pass
+
     PROCESS.clear()
 
-def run_open3d_viewer(p_val, l_val, t_val, data_event):
+
+def run_viewer(p_val, l_val, t_val, data_event):
     rclpy.init()
     app = gui.Application.instance
     app.initialize()
 
-    node = LivoxGUI(app, p_val=p_val, l_val=l_val, t_val=t_val, data_event=data_event)
-    ros_thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
-    ros_thread.start()
-    
-    app.run()
-    node.save_roi_to_file()
-    node.destroy_node()
-    rclpy.shutdown()
-    ros_thread.join()
+    node = LivoxCalib(app, p_val, l_val, t_val, data_event)
 
-def open3d_thread():
-    p = Process(target=run_open3d_viewer, args=(P_VAL, L_VAL, T_VAL, DATA_EVENT))
+    def safe_spin(n):
+        try:
+            rclpy.spin(n)
+        except Exception:
+            pass  # <--- Telan semua error, termasuk ExternalShutdownException
+
+    ros_thread = threading.Thread(target=safe_spin, args=(node,), daemon=True)
+
+    ros_thread.start()
+
+    app.run()
+
+    # Setelah window Open3D ditutup → hentikan ROS & keluar cepat
+    try:
+        node.save_roi_to_file()
+    except:
+        pass
+
+    try:
+        node.destroy_node()
+    except:
+        pass
+
+    try:
+        rclpy.shutdown()
+    except:
+        pass
+
+    try:
+        ros_thread.join(timeout=0.5)
+    except:
+        pass
+
+    # Pastikan proses benar-benar mati
+    os._exit(0)
+
+
+def _cleanup_child():
+    """Dipanggil saat proses GUI mati normal / crash, untuk jaga-jaga."""
+    try:
+        kill_viewer()
+    except Exception:
+        pass
+
+atexit.register(_cleanup_child)
+
+
+def start_viewer_once():
+    """Start viewer jika belum berjalan."""
+    if PROCESS and PROCESS[0].is_alive():
+        return PROCESS[0]
+
+    p = Process(target=run_viewer, args=(P_VAL, L_VAL, T_VAL, DATA_EVENT))
+    p.daemon = True  # child mati kalau parent (GUI) mati
+    PROCESS.clear()
     PROCESS.append(p)
     p.start()
     return p
 
-class Home(ctk.CTkFrame) :
-    def __init__(self, parent, show_page) :
+
+# ================= GUI PAGE =================
+
+class Home(ctk.CTkFrame):
+    def __init__(self, parent, show_page):
         super().__init__(parent, fg_color="white")
         header.Header(self, show_page).pack(fill="x")
 
-        if not PROCESS:  # hanya buat viewer pertama kali
-            open3d_thread()
-        else:
-            print("[INFO] Open3D viewer sudah berjalan, tidak membuat ulang.")
+        # HOME MODE ⇒ hapus panel CALIB
+        if os.path.exists(CALIB_FLAG_PATH):
+            os.remove(CALIB_FLAG_PATH)
 
+        # Start viewer sekali
+        start_viewer_once()
 
+        # When GUI closed, kill viewer
         def on_close():
-            print("Closing application...")
-            # Setelah GUI ditutup, hentikan semua proses ros2 launch
-            os.system("pkill -f 'livox_ros_driver2'")
-            kill()
-            if os.path.exists("/tmp/lidar_visible"):
-                os.remove("/tmp/lidar_visible")
+            print("[GUI] Closing, killing viewer...")
+            kill_viewer()
+            if os.path.exists(VISIBLE_FLAG_PATH):
+                os.remove(VISIBLE_FLAG_PATH)
             parent.destroy()
 
-        self.stop_consumer = threading.Event()
-        self.dimension_consumer_thread = threading.Thread(target=self.dimension_consumer, daemon=True)
-        self.dimension_consumer_thread.start()
-
-        self.bind("<Destroy>", self.on_destroy)
-
         parent.protocol("WM_DELETE_WINDOW", on_close)
-        self.last_update = 0
+        parent._on_close_callback = on_close  # supaya bisa dipanggil dari main.py
 
-        # Font Template
+        # Thread consumer shared memory
+        self.stop_flag = threading.Event()
+        threading.Thread(target=self.consume_dimension, daemon=True).start()
+
+        self.bind("<Destroy>", lambda e: self.stop_flag.set())
+
+        # UI
         fontSmall = ctk.CTkFont(family="Verdana", size=14, weight="bold")
         font = ctk.CTkFont(family="Verdana", size=24, weight="bold")
         fontBig = ctk.CTkFont(family="Verdana", size=48, weight="bold")
 
-        # Check Connection Database and Lidar
-        self.after(3000, lambda: connection_check.connection_check(self))
-
-        container = ctk.CTkFrame(self, fg_color="white", height=100)
+        container = ctk.CTkFrame(self, fg_color="white")
         container.pack(fill="both", expand=True, padx=20, pady=20)
 
+        # tombol viewer
         self.openWindow = ctk.CTkButton(
             container,
             text="Open 3D Lidar Viewer",
             font=fontSmall,
             fg_color="#F01382",
             command=self.toggle_lidar,
-            height=40,
-            hover=False,
-            cursor="hand2"
+            height=40
         )
-        self.openWindow.pack(fill="x")
+        self.openWindow.pack(fill="x", pady=(0, 20))
 
-        # Data
-        valueFrame = ctk.CTkFrame(container, fg_color="white", height=100)
-        valueFrame.pack(fill="both", expand=True, pady=(20, 0))
+        # nilai dimensi
+        valueFrame = ctk.CTkFrame(container, fg_color="white")
+        valueFrame.pack(fill="both", expand=True)
 
-        valueFrame.columnconfigure((0, 1, 2), weight=1, uniform="a")
-        valueFrame.rowconfigure(0, weight=1)
-        valueFrame.grid_propagate(False)
+        self.lengthValue = self._build_box(valueFrame, "Panjang", font, fontBig)
+        self.widthValue  = self._build_box(valueFrame, "Lebar", font, fontBig)
+        self.heightValue = self._build_box(valueFrame, "Tinggi", font, fontBig)
 
-        # Data Length
-        self.lengthFrame = ctk.CTkFrame(valueFrame, fg_color="white", border_width=2, border_color="darkgrey", corner_radius=20)
-        # self.lengthFrame.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
-        self.lengthFrame.pack(fill="x", pady=(0, 10))
-
-        self.lengthLabel = ctk.CTkLabel(self.lengthFrame, text="Panjang", font=font, text_color="#F01382")
-        self.lengthLabel.pack(pady=(50, 0))
-
-        self.lengthValue = ctk.CTkLabel(self.lengthFrame, text="12", font=fontBig, text_color="#F01382")
-        self.lengthValue.pack(pady=50)
-
-        # Data Width
-        self.widthFrame = ctk.CTkFrame(valueFrame, fg_color="white", border_width=2, border_color="darkgrey", corner_radius=20)
-        # self.widthFrame.grid(row=0, column=1, sticky="nsew", padx=10)
-        self.widthFrame.pack(fill="x", pady=10)
-
-        self.widthLabel = ctk.CTkLabel(self.widthFrame, text="Lebar", font=font, text_color="#F01382")
-        self.widthLabel.pack(pady=(50, 0))
-
-        self.widthValue = ctk.CTkLabel(self.widthFrame, text="2.5", font=fontBig, text_color="#F01382")
-        self.widthValue.pack(pady=50)
-
-        # Data Height
-        self.heightFrame = ctk.CTkFrame(valueFrame, fg_color="white", border_width=2, border_color="darkgrey", corner_radius=20)
-        # self.heightFrame.grid(row=0, column=2, sticky="nsew", padx=(10, 0))
-        self.heightFrame.pack(fill="x", pady=(10, 0))
-
-        self.heightLabel = ctk.CTkLabel(self.heightFrame, text="Tinggi", font=font, text_color="#F01382")
-        self.heightLabel.pack(pady=(50, 0))
-
-        self.heightValue = ctk.CTkLabel(self.heightFrame, text="4", font=fontBig, text_color="#F01382")
-        self.heightValue.pack(pady=50)
-
+        # auto update button text
         self.sync_button_text()
-        self.dimension_consumer_thread = threading.Thread(target=self.dimension_consumer, daemon=True)
-        self.dimension_consumer_thread.start()
-    
+        self.last_update = 0
+
+    def _build_box(self, parent, title, font, fontBig):
+        box = ctk.CTkFrame(
+            parent, fg_color="white",
+            border_width=2, border_color="darkgrey",
+            corner_radius=20,
+        )
+        box.pack(fill="x", pady=10)
+        ctk.CTkLabel(box, text=title, font=font, text_color="#F01382").pack(pady=(40, 0))
+        val = ctk.CTkLabel(box, text="0", font=fontBig, text_color="#F01382")
+        val.pack(pady=40)
+        return val
+
+    # =============== BUTTON VIEWER ===============
+
     def toggle_lidar(self):
-        flag_window = "/tmp/lidar_visible"
-        if os.path.exists(flag_window):
-            os.remove(flag_window)
-            self.openWindow.configure(text="Open 3D Lidar Viewer")
+        if os.path.exists(VISIBLE_FLAG_PATH):
+            os.remove(VISIBLE_FLAG_PATH)
         else:
-            open(flag_window, "a").close()
-            self.openWindow.configure(text="Close 3D Lidar Viewer")
-    
+            open(VISIBLE_FLAG_PATH, "w").close()
+
     def sync_button_text(self):
-        flag_path = "/tmp/lidar_visible"
-        if os.path.exists(flag_path):
-            self.openWindow.configure(text="Hide 3D Lidar Viewer")
+        if os.path.exists(VISIBLE_FLAG_PATH):
+            self.openWindow.configure(text="Hide 3D Viewer")
         else:
-            self.openWindow.configure(text="Open 3D Lidar Viewer")
+            self.openWindow.configure(text="Open 3D Viewer")
         self.after(300, self.sync_button_text)
 
-    def on_destroy(self, event=None):
-        print("[DEBUG] Home frame destroyed (page switched)")
-        self.stop_consumer.set()
+    # =============== SHARED MEMORY ===============
 
-    def dimension_consumer(self):
-        """Thread ini tunggu event, ambil latest shared value, lalu schedule update UI."""
-        while not self.stop_consumer.is_set():
+    def consume_dimension(self):
+        while not self.stop_flag.is_set():
             DATA_EVENT.wait()
-            if self.stop_consumer.is_set():
+            if self.stop_flag.is_set():
                 break
+
             p = P_VAL.value
             l = L_VAL.value
             t = T_VAL.value
-            print(f"[DEBUG] Dapat data langsung via shared mem: P={p:.2f}, L={l:.2f}, T={t:.2f}")
+
             DATA_EVENT.clear()
-            if not self.winfo_exists():
-                break
-            self.after(0, self.update_dimension, p, l, t)
 
-    def update_dimension(self, p, l, t):
-        if not self.winfo_exists():
-            print("[DEBUG] Frame sudah dihancurkan, abaikan update_dimension")
+            self.after(0, self.update_dim, p, l, t)
+
+    def update_dim(self, p, l, t):
+        now = time.time()
+        if now - self.last_update < 0.1:
             return
-
-        current_time = time.time()
-        if current_time - self.last_update < 0.1:
-            print("[DEBUG] Skipping UI update (debounce)")
-            return
-
-        try:
-            self.lengthValue.configure(text=f"{p:.2f}")
-            self.widthValue.configure(text=f"{l:.2f}")
-            self.heightValue.configure(text=f"{t:.2f}")
-            self.last_update = current_time
-            print("[DEBUG] UI updated")
-        except Exception as e:
-            print(f"[DEBUG] Gagal update UI: {type(e).__name__} - {e}")
+        self.lengthValue.configure(text=f"{p:.2f}")
+        self.widthValue.configure(text=f"{l:.2f}")
+        self.heightValue.configure(text=f"{t:.2f}")
+        self.last_update = now
