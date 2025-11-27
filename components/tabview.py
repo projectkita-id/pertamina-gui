@@ -65,7 +65,7 @@ class Tabview(ctk.CTkFrame):
             border_color="darkgrey",
             fg_color="#E0E0E0",
             hover_color="white",
-            text_color="#2913F0",
+            text_color="#F01382",
             command=lambda: self.show_tab("db")
         )
         self.db_btn.pack(side="left", fill="y", padx=10)
@@ -82,7 +82,7 @@ class Tabview(ctk.CTkFrame):
             border_color="darkgrey",
             fg_color="#E0E0E0",
             hover_color="white",
-            text_color="#2913F0",
+            text_color="#F01382",
             command=lambda: self.show_tab("calibrate")
         )
         self.calibrate_btn.pack(side="left", fill="y", padx=10)
@@ -99,7 +99,7 @@ class Tabview(ctk.CTkFrame):
             font=font,
             fg_color="transparent",
             hover=False,
-            text_color="#2913F0",
+            text_color="#F01382",
             cursor="hand2",
             command=lambda: self.back_to_home(show_page)
         )
@@ -116,7 +116,7 @@ class Tabview(ctk.CTkFrame):
             border_color="darkgrey"
         )
 
-        ctk.CTkLabel(self.db_tab, text="Address", font=font, text_color="#2913F0").pack(pady=(80, 5))
+        ctk.CTkLabel(self.db_tab, text="Address", font=font, text_color="#F01382").pack(pady=(80, 5))
         self.addr = ctk.CTkEntry(
             self.db_tab,
             width=400,
@@ -129,7 +129,7 @@ class Tabview(ctk.CTkFrame):
         )
         self.addr.pack(pady=5)
 
-        ctk.CTkLabel(self.db_tab, text="Username", font=font, text_color="#2913F0").pack(pady=5)
+        ctk.CTkLabel(self.db_tab, text="Username", font=font, text_color="#F01382").pack(pady=5)
         self.usn = ctk.CTkEntry(
             self.db_tab,
             width=400,
@@ -142,7 +142,7 @@ class Tabview(ctk.CTkFrame):
         )
         self.usn.pack(pady=5)
 
-        ctk.CTkLabel(self.db_tab, text="Password", font=font, text_color="#2913F0").pack(pady=5)
+        ctk.CTkLabel(self.db_tab, text="Password", font=font, text_color="#F01382").pack(pady=5)
         self.passwd = ctk.CTkEntry(
             self.db_tab,
             width=400,
@@ -155,7 +155,7 @@ class Tabview(ctk.CTkFrame):
         )
         self.passwd.pack(pady=5)
 
-        ctk.CTkLabel(self.db_tab, text="Port", font=font, text_color="#2913F0").pack(pady=5)
+        ctk.CTkLabel(self.db_tab, text="Port", font=font, text_color="#F01382").pack(pady=5)
         self.port = ctk.CTkEntry(
             self.db_tab,
             width=400,
@@ -168,7 +168,7 @@ class Tabview(ctk.CTkFrame):
         )
         self.port.pack(pady=5)
 
-        ctk.CTkLabel(self.db_tab, text="Database Name", font=font, text_color="#2913F0").pack(pady=5)
+        ctk.CTkLabel(self.db_tab, text="Database Name", font=font, text_color="#F01382").pack(pady=5)
         self.db_name = ctk.CTkEntry(
             self.db_tab,
             width=400,
@@ -205,7 +205,7 @@ class Tabview(ctk.CTkFrame):
             height=50,
             corner_radius=20,
             fg_color="red",
-            hover_color="#2913F0",
+            hover_color="#F01382",
             cursor="hand2",
             command=lambda: self.back_to_home(show_page)
         ).pack(fill="x", pady=10)
@@ -243,7 +243,7 @@ class Tabview(ctk.CTkFrame):
         self.openWindow = ctk.CTkButton(
             space,
             text="Open3D LiDAR Viewer",   # tampilan dari kode 1
-            fg_color="#2913F0",
+            fg_color="#F01382",
             font=fontSmall,
             hover=False,
             cursor="hand2",
@@ -270,7 +270,7 @@ class Tabview(ctk.CTkFrame):
 
         if name == "db":
             self.db_tab.pack(fill="both", expand=True, pady=10)
-            self.db_btn.configure(fg_color="white", text_color="#2913F0")
+            self.db_btn.configure(fg_color="white", text_color="#F01382")
 
             # HOME MODE → disable panel viewer
             if os.path.exists(CALIB_MODE_FLAG_PATH):
@@ -278,7 +278,7 @@ class Tabview(ctk.CTkFrame):
 
         elif name == "calibrate":
             self.calibrate_tab.pack(fill="both", expand=True, pady=10)
-            self.calibrate_btn.configure(fg_color="white", text_color="#2913F0")
+            self.calibrate_btn.configure(fg_color="white", text_color="#F01382")
 
             # CALIB MODE → aktifkan panel viewer
             open(CALIB_MODE_FLAG_PATH, "a").close()

@@ -21,27 +21,27 @@ class CalibrateTabContent(ctk.CTkFrame):
         self.move_tab = ctk.CTkFrame(self, fg_color="white", corner_radius=20)
         self.move_tab.pack(fill="x", expand=True)
 
-        ctk.CTkLabel(self.move_tab, text="Maju / Mundur", font=fontNormal, text_color="#2913F0").pack(pady=(20, 10))
+        ctk.CTkLabel(self.move_tab, text="Maju / Mundur", font=fontNormal, text_color="#F01382").pack(pady=(20, 10))
         self.moveX = input.NumberInput(self.move_tab, key_up="Q", key_down="E")
         self.moveX.pack(pady=(0, 20))
 
-        ctk.CTkLabel(self.move_tab, text="Kiri / Kanan", font=fontNormal, text_color="#2913F0").pack(pady=(20, 10))
+        ctk.CTkLabel(self.move_tab, text="Kiri / Kanan", font=fontNormal, text_color="#F01382").pack(pady=(20, 10))
         self.moveY = input.NumberInput(self.move_tab, key_up="A", key_down="D")
         self.moveY.pack(pady=(0, 20))
 
-        ctk.CTkLabel(self.move_tab, text="Atas / Bawah", font=fontNormal, text_color="#2913F0").pack(pady=(20, 10))
+        ctk.CTkLabel(self.move_tab, text="Atas / Bawah", font=fontNormal, text_color="#F01382").pack(pady=(20, 10))
         self.moveZ = input.NumberInput(self.move_tab, key_up="W", key_down="S")
         self.moveZ.pack(pady=(0, 20))
 
-        ctk.CTkLabel(self.move_tab, text="Pitch", font=fontNormal, text_color="#2913F0").pack(pady=(20, 10))
+        ctk.CTkLabel(self.move_tab, text="Pitch", font=fontNormal, text_color="#F01382").pack(pady=(20, 10))
         self.pitch = input.NumberInput(self.move_tab, key_up="U", key_down="Y")
         self.pitch.pack(pady=(0, 20))
 
-        ctk.CTkLabel(self.move_tab, text="Kiri / Kanan", font=fontNormal, text_color="#2913F0").pack(pady=(20, 10))
+        ctk.CTkLabel(self.move_tab, text="Kiri / Kanan", font=fontNormal, text_color="#F01382").pack(pady=(20, 10))
         self.roll = input.NumberInput(self.move_tab, key_up="O", key_down="P")
         self.roll.pack(pady=(0, 20))
 
-        ctk.CTkLabel(self.move_tab, text="Atas / Bawah", font=fontNormal, text_color="#2913F0").pack(pady=(20, 10))
+        ctk.CTkLabel(self.move_tab, text="Atas / Bawah", font=fontNormal, text_color="#F01382").pack(pady=(20, 10))
         self.yaw = input.NumberInput(self.move_tab, key_up="K", key_down="L")
         self.yaw.pack(pady=(0, 20))
 

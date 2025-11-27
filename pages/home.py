@@ -160,7 +160,7 @@ class Home(ctk.CTkFrame):
             container,
             text="Open 3D Lidar Viewer",
             font=fontSmall,
-            fg_color="#2913F0",
+            fg_color="#F01382",
             command=self.toggle_lidar,
             height=40
         )
@@ -185,8 +185,8 @@ class Home(ctk.CTkFrame):
             corner_radius=20,
         )
         box.pack(fill="x", pady=10)
-        ctk.CTkLabel(box, text=title, font=font, text_color="#2913F0").pack(pady=(40, 0))
-        val = ctk.CTkLabel(box, text="0", font=fontBig, text_color="#2913F0")
+        ctk.CTkLabel(box, text=title, font=font, text_color="#F01382").pack(pady=(40, 0))
+        val = ctk.CTkLabel(box, text="0", font=fontBig, text_color="#F01382")
         val.pack(pady=40)
         return val
 

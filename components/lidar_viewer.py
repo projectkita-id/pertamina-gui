@@ -995,10 +995,20 @@ class LivoxCalib(Node):
 
                 if result is not None:
                     P, L, T, obb = result
-                    dim_text = f"Objek: P={P:.3f} m, L={L:.3f} m, T={T:.3f} m"
+
+                    # ==========================================================
+                    # ======= FILTER TINGGI RENDAH: T < 0.5 → semua = 0 ========
+                    # ==========================================================
+                    if T < 0.5:
+                        P = 0.0
+                        L = 0.0
+                        T = 0.0
+                        obb = None   # opsional: hapus bounding box kecil
+                        dim_text = "Objek terlalu rendah (<0.5 m)"
+                    else:
+                        dim_text = f"Objek: P={P:.3f} m, L={L:.3f} m, T={T:.3f} m"
 
                     local_obb = obb
-
                     # Shared mem ke Tkinter
                     try:
                         self.p_val.value = P
