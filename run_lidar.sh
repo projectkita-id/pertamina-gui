@@ -4,7 +4,7 @@
 #  Lidar Data Viewer Launcher (AUTO-RESTART GUI)
 # ===============================================
 
-BASE_DIR="/home/yants/pertamina-gui"
+BASE_DIR="/home/uppkb/dimension"
 
 echo "[🔧] Aktifkan ROS2..."
 source /opt/ros/humble/setup.bash

@@ -16,7 +16,7 @@ class Header(ctk.CTkFrame):
         head.pack(fill="x", padx=20)
 
         # Header Content
-        header = ctk.CTkLabel(head, text="UPPKB PADANG ULAK TANDING", font=font, fg_color="white", text_color="#F01382")
+        header = ctk.CTkLabel(head, text="UPPKB CEKIK (1)", font=font, fg_color="white", text_color="#F01382")
         header.pack(side="left", pady=(20, 0))
         
         setting = Image.open('assets/icon/settings.png')
