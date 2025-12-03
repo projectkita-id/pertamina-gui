@@ -53,9 +53,9 @@ sudo apt update && sudo apt install curl -y
 Tambahkan ros2-apt-source:
 
 ```
-export ROS_APT_SOURCE_VERSION=$(curl -s https://api.github.com/repos/ros-infrastructure/ros-apt-source/releases/latest | grep -F "tag_name" | awk -F\" '{print $4}')
-curl -L -o /tmp/ros2-apt-source.deb "https://github.com/ros-infrastructure/ros-apt-source/releases/download/${ROS_APT_SOURCE_VERSION}/ros2-apt-source_${ROS_APT_SOURCE_VERSION}.$(. /etc/os-release && echo ${UBUNTU_CODENAME}).deb"
-sudo dpkg -i /tmp/ros2-apt-source.deb
+sudo curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key -o /usr/share/keyrings/ros-archive-keyring.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(. /etc/os-release && echo $UBUNTU_CODENAME) main" \
+| sudo tee /etc/apt/sources.list.d/ros2.list
 ```
 
 ### 2.3 Instalasi ROS2 Humble Desktop
@@ -188,27 +188,51 @@ autologin-user-timeout=0
 user-session=ubuntu
 ```
 
-## 🟪 12. Autorun GUI Setelah Login
+## 🟪 12. Autorun GUI Setelah reboot
 ```
-mkdir -p ~/.config/autostart
-nano ~/.config/autostart/pertamina-gui.desktop
+nano ~/Desktop/run_lidar.desktop
 ```
 
 Isi:
 
 ```
 [Desktop Entry]
+Version=1.0
 Type=Application
-Exec=bash -c "source /opt/ros/humble/setup.bash && source ~/pertamina-gui/livox_ws/install/setup.bash && python3 ~/pertamina-gui/main.py"
-Hidden=false
-NoDisplay=false
+Name=Lidar Dimension
+Comment=Pengukuran dimensi kendaraan
+Exec=gnome-terminal -- bash -c "/home/uppkb/dimension/run_lidar.sh"
+Icon=/home/uppkb/dimension/assets/icon/logo.ico
+Terminal=false
+Categories=Utility;
 X-GNOME-Autostart-enabled=true
-Name=Pertamina GUI
 ```
-
+Beri izin eksekusi:
+```
+chmod +x ~/Desktop/run_lidar.desktop
+```
+Autostart:
+```
+mkdir -p ~/.config/autostart
+cp ~/Desktop/run_lidar.desktop ~/.config/autostart/
+```
+Aktifkan AUTOLOGIN:
+```
+sudo nano /etc/lightdm/lightdm.conf
+```
+isi dengan:
+```
+[Seat:*]
+autologin-user=uppkb
+autologin-user-timeout=0
+```
 ## 🟩 13. Testing Final
 Reboot:
-
+Reboot LightDM:
+```
+sudo systemctl restart lightdm
+```
+Reboot Total:
 ```
 sudo reboot
 ```
